@@ -438,8 +438,8 @@ function scheduleFlush(db, key, delay, deps) {
 /**
  * Routing step for one approved event. Never throws and never touches the Runtime path.
  * @param {object} db Prisma client.
- * @param {{orgId:string,userId:string,event:{id:string,data:object,occurred_at?:string},sub:{toolkit:string,slug?:string,subject?:string}}} input Event and its subscription.
- * @param {object} [deps] Test hooks: config, runtimeEnabled, deliver, schedule.
+ * @param {{orgId:string,userId:string,event:{id:string,data:object,occurred_at?:string,received_at?:string|Date},sub:{toolkit:string,slug?:string,subject?:string}}} input Event and its subscription.
+ * @param {object} [deps] Test hooks: config, runtimeEnabled, deliver, schedule, now.
  * @returns {Promise<object>} What was recorded.
  */
 export async function routeApprovedEvent(db, { orgId, userId, event, sub }, deps = {}) {
@@ -463,7 +463,11 @@ export async function routeApprovedEvent(db, { orgId, userId, event, sub }, deps
   const decision = decideRouting({ facts, orgId, eventUserId: userId, subject: sub.subject ?? null, employees, watches, directory, adminUserIds, config });
   for (const skip of decision.skips) await recordDelivery(db, { ...base, employeeId: skip.employeeId, reason: 'candidate', status: 'skipped', skipReason: skip.reason });
   if (!mentionsOnly && !decision.targets.length && !decision.skips.length && !(deps.runtimeEnabled ?? await readRuntimeEnabled(db, orgId))) await recordDelivery(db, { ...base, employeeId: EVENT_LEVEL, reason: 'none', status: 'skipped', skipReason: 'no_target_runtime_off' });
+  // The classifier re-reads events up to 7 days old: an event older than the wake age goes to the brief, never to a wake.
+  const receivedAt = new Date(event.received_at ?? event.occurred_at ?? NaN).getTime();
+  const stale = Number.isFinite(receivedAt) && (deps.now ?? Date.now()) - receivedAt > config.maxWakeAgeMs;
   for (const target of decision.targets) {
+    if (stale) { await recordDelivery(db, { ...base, employeeId: target.employeeId, reason: target.reason, watchId: target.watchIds[0], status: 'briefed', skipReason: 'too_old' }); continue; }
     await recordDelivery(db, { ...base, employeeId: target.employeeId, reason: target.reason, watchId: target.watchIds[0], status: 'pending' });
     (deps.schedule ?? (() => scheduleFlush(db, `${orgId}:${target.employeeId}`, config.coalesceMs + 500, deps)))(target);
   }

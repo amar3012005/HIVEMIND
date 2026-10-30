@@ -172,6 +172,19 @@ test('routing records one pending delivery per (event, employee); a replay adds 
   assert.deepEqual([deliveries[0].employee_id, deliveries[0].reason, deliveries[0].status], [LEO, 'mention', 'pending']);
 });
 
+test('an event older than the wake age is recorded for the brief and never scheduled', async () => {
+  const { db, deliveries, store } = fakeDb();
+  store.events.set('old', { sender: 'boss@acme.com', sender_verified: true, subject: '@leo from last week', message_text: 'body' });
+  let scheduled = 0;
+  const now = Date.parse('2026-10-30T10:00:00Z');
+  await routeApprovedEvent(db, { orgId: ORG, userId: USER, event: { id: 'old', data: store.events.get('old'), received_at: new Date(now - 3 * 3_600_000) }, sub }, { config: on, now, schedule: () => { scheduled += 1; } });
+  assert.deepEqual(deliveries.map(r => [r.employee_id, r.status, r.skip_reason]), [[LEO, 'briefed', 'too_old']]);
+  assert.equal(scheduled, 0);
+  store.events.set('new', { sender: 'boss@acme.com', sender_verified: true, subject: '@leo today', message_text: 'body' });
+  await routeApprovedEvent(db, { orgId: ORG, userId: USER, event: { id: 'new', data: store.events.get('new'), received_at: new Date(now - 60_000) }, sub }, { config: on, now, schedule: () => { scheduled += 1; } });
+  assert.deepEqual([deliveries[1].status, scheduled], ['pending', 1]);
+});
+
 test('disabled routing records nothing; the switch is off by default', async () => {
   const { db, deliveries, store } = fakeDb();
   store.events.set('e', { subject: '@leo' });

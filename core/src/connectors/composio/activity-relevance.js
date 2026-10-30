@@ -4,7 +4,8 @@ import { decisionGatewayProviderConfig } from '../../agent/decision-gateway-serv
 import { createWorkspaceNotification } from '../../workspace/notifications.js';
 import { createRuntimeAttentionBridge } from './runtime-attention-bridge.js';
 import { readRuntimeEnabled } from '../../organizations/runtime-setting.js';
-import { routeEventGuarded, routingConfig } from '../employee-event-routing.js';
+import { loadRoutableEmployees, routeEventGuarded, routingConfig } from '../employee-event-routing.js';
+import { decideEmployeeTarget, loadEmployeeRoster, EMPLOYEE_TARGET_POLICY } from './employee-attention-target.js';
 
 export const ACTIVITY_RELEVANCE_POLICY = 'company_activity_relevance_v3';
 const POLICY = ACTIVITY_RELEVANCE_POLICY;
@@ -115,9 +116,10 @@ export function classifyPendingActivity(ctx) {
         // With it switched off nothing here differs from before.
         const runtimeOn = routing.enabled ? await readRuntimeEnabled(db, ctx.orgId).catch(() => true) : true;
         const bridge = runtimeOn ? (ctx.runtimeAttention || createRuntimeAttentionBridge()) : undefined;
-        // Routing runs once per event, after the decision: an approved event takes mentions and watches, any other event only an in-company @mention.
-        // It is started after the decision is stored and never awaited: it cannot fail or hold up intake (routeEventGuarded bounds and audits it).
-        const routeToEmployees = (mentionsOnly) => (ctx.employeeRouter || routeEventGuarded)(db, { orgId: ctx.orgId, userId: ctx.userId, event: row, sub: sub[0] }, { config: routing, ...(mentionsOnly ? { mentionsOnly: true } : {}) }).catch(() => {});
+        // Routing runs once per event, after the decision: an approved event takes mentions, watches and the attention layer's
+        // employee choice; any other event only an in-company @mention. Started after the decision is stored and never awaited.
+        const routeToEmployees = (mentionsOnly, attention) => (ctx.employeeRouter || routeEventGuarded)(db, { orgId: ctx.orgId, userId: ctx.userId, event: row, sub: sub[0] },
+          { config: routing, ...(mentionsOnly ? { mentionsOnly: true } : attention?.targetEmployeeId ? { attentionTarget: { employeeId: attention.targetEmployeeId } } : {}) }).catch(() => {});
         if (bridge && row.relevance_decision?.runtimeAttention?.policy==='runtime_attention_v3'
           && ['notify','wake'].includes(row.relevance_decision.runtimeAttention.action) && !row.relevance_decision.runtimeDelivery) {
           try { await deliverAttention(db,ctx,row,row.relevance_decision,bridge,sub[0].toolkit); if (routing.enabled) void routeToEmployees(false); continue; }
@@ -136,8 +138,15 @@ export function classifyPendingActivity(ctx) {
         } else {
           const context=await companyContext(ctx);
           receipt = await decideActivityRelevance({ event: { ...row, toolkit: sub[0].toolkit }, context });
+          // Runtime off: the same attention step also picks the employee whose role or recent work owns the event.
+          if (routing.enabled && !runtimeOn && receipt.status === 'approved') {
+            const target = await (ctx.employeeTargeter || (async () => decideEmployeeTarget({ event: { app: sub[0].toolkit, title: clip(row.data?._hivemind?.title || row.data?.subject || row.data?.title, 200), sender: clip(row.data?.sender || row.data?.from, 120), preview: connectedEventPreview(row.data || {}, 900) },
+              roster: await loadEmployeeRoster(db, ctx.orgId, await loadRoutableEmployees(db, ctx.orgId, ctx.userId)), company: { company: context.company } })))().catch(() => null);
+            if (target) receipt = { ...receipt, employeeAttention: { policy: EMPLOYEE_TARGET_POLICY, targetEmployeeId: target.employeeId, probability: target.probability, margin: target.margin, because: target.because } };
+          }
         }
         await db.$executeRawUnsafe(`UPDATE hivemind_trigger_events SET relevance_status=$1,relevance_decision=$2::jsonb,evaluated_at=now() WHERE id=$3`, receipt.status, JSON.stringify(receipt), row.id);
+
         if (['wake','notify'].includes(receipt.runtimeAttention?.action) && bridge) {
           try {
             await deliverAttention(db,ctx,row,receipt,bridge,sub[0].toolkit);
@@ -149,7 +158,7 @@ export function classifyPendingActivity(ctx) {
             continue;
           }
         }
-        if (routing.enabled) void routeToEmployees(receipt.status !== 'approved');
+        if (routing.enabled) void routeToEmployees(receipt.status !== 'approved', receipt.employeeAttention);
       }
       if (rows.length < 6 && !worker.rerun) break;
     }

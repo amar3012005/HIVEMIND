@@ -10,6 +10,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readRuntimeEnabled } from '../organizations/runtime-setting.js';
 import { dispatchOpenDotEvent } from '../employees/open-dot-runtime-bridge.js';
+import { attentionSignal } from './attention-signal.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Audit sentinel for a skip that belongs to the event, not to one employee. */
@@ -326,7 +327,9 @@ export function wakeIdFor(employeeId, eventIds) {
  * @returns {object} Event payload.
  */
 export function wireEvent(facts, row) {
+  const routedBecause = row.reason === 'attention' ? row.decision?.employeeAttention?.because : undefined;
   return {
+    ...(row.data !== undefined ? { signal: attentionSignal({ toolkit: facts.toolkit, data: row.data, decision: row.decision, routedBecause }) } : {}),
     eventId: row.event_id, toolkit: facts.toolkit, triggerSlug: facts.slug, reason: row.reason, ...(row.watch_id ? { watchId: row.watch_id } : {}),
     ...(row.instruction ? { instruction: clip(row.instruction, 1000) } : {}),
     occurredAt: row.occurred_at ? new Date(row.occurred_at).toISOString() : null,
@@ -453,7 +456,7 @@ export async function routeApprovedEvent(db, { orgId, userId, event, sub }, deps
   const watches = mentionsOnly ? [] : await db.$queryRawUnsafe('SELECT * FROM hivemind_employee_watches WHERE org_id=$1 AND toolkit=$2 AND trigger_slug=$3 AND enabled', orgId, sub.toolkit, sub.slug);
   const base = { orgId, userId, eventId: event.id, toolkit: sub.toolkit, slug: sub.slug, summary: clip(facts.title || facts.body, 140) };
   const hasMention = facts.mentionText.includes('@');
-  if (!watches.length && !hasMention) {
+  if (!watches.length && !hasMention && !deps.attentionTarget?.employeeId) {
     // Runtime on: today's path is the whole story. Runtime off: nobody reads this event, so say so in the audit.
     if (!mentionsOnly && !(deps.runtimeEnabled ?? await readRuntimeEnabled(db, orgId))) await recordDelivery(db, { ...base, employeeId: EVENT_LEVEL, reason: 'none', status: 'skipped', skipReason: 'no_target_runtime_off' });
     return { targets: [], skips: [] };
@@ -466,6 +469,10 @@ export async function routeApprovedEvent(db, { orgId, userId, event, sub }, deps
   // The classifier re-reads events up to 7 days old: an event older than the wake age goes to the brief, never to a wake.
   const receivedAt = new Date(event.received_at ?? event.occurred_at ?? NaN).getTime();
   const stale = Number.isFinite(receivedAt) && (deps.now ?? Date.now()) - receivedAt > config.maxWakeAgeMs;
+  // The attention layer's employee choice (Runtime off) applies only when no mention or watch already claimed the event.
+  const chosen = deps.attentionTarget?.employeeId;
+  if (chosen && !decision.targets.length && employees.some(employee => employee.id === chosen) && !decision.skips.some(skip => skip.employeeId === chosen))
+    decision.targets.push({ employeeId: chosen, reason: 'attention', watchIds: [] });
   for (const target of decision.targets) {
     if (stale) { await recordDelivery(db, { ...base, employeeId: target.employeeId, reason: target.reason, watchId: target.watchIds[0], status: 'briefed', skipReason: 'too_old' }); continue; }
     await recordDelivery(db, { ...base, employeeId: target.employeeId, reason: target.reason, watchId: target.watchIds[0], status: 'pending' });
@@ -564,11 +571,11 @@ async function flushEmployee(db, orgId, employeeId, now, config, deps) {
   if ((recent[0]?.wakes ?? 0) >= config.maxWakesPerHour) { await finish(allIds, 'briefed', 'rate_limited'); out.briefed += rows.length; return out; }
   const kept = rows.slice(0, config.maxEventsPerWake), overflow = rows.slice(config.maxEventsPerWake);
   if (overflow.length) { await finish(overflow.map(row => row.id), 'briefed', 'wake_event_cap'); out.briefed += overflow.length; }
-  const events = await db.$queryRawUnsafe('SELECT id,data,occurred_at FROM hivemind_trigger_events WHERE id = ANY($1::text[]) AND org_id=$2', kept.map(row => row.event_id), orgId);
+  const events = await db.$queryRawUnsafe('SELECT id,data,occurred_at,relevance_decision FROM hivemind_trigger_events WHERE id = ANY($1::text[]) AND org_id=$2', kept.map(row => row.event_id), orgId);
   const instructions = new Map((kept.some(row => row.watch_id) ? await db.$queryRawUnsafe('SELECT id,instruction FROM hivemind_employee_watches WHERE id = ANY($1::uuid[])', kept.map(row => row.watch_id).filter(Boolean)) : []).map(row => [row.id, row.instruction]));
   const wire = kept.flatMap(row => {
     const event = events.find(item => item.id === row.event_id);
-    return event ? [wireEvent(eventFacts(row.toolkit, row.trigger_slug, event.data, config), { ...row, occurred_at: event.occurred_at, instruction: instructions.get(row.watch_id) })] : [];
+    return event ? [wireEvent(eventFacts(row.toolkit, row.trigger_slug, event.data, config), { ...row, occurred_at: event.occurred_at, instruction: instructions.get(row.watch_id), data: event.data, decision: event.relevance_decision ?? undefined })] : [];
   });
   const keptIds = kept.map(row => row.id);
   if (!wire.length) { await finish(keptIds, 'skipped', 'event_unavailable'); out.skipped += kept.length; return out; }

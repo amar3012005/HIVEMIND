@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { createOpenRouterJevProvider } from '../agent/decision-gateway.js';
 import { decisionGatewayProviderConfig } from '../agent/decision-gateway-service.js';
 import { sendSystemEmail } from '../email/email-service.js';
+import { readEmailLocale } from '../email/email-locale.js';
 import { createWorkspaceNotification } from '../workspace/notifications.js';
 
 export const PROACTIVE_TRIGGER_KEY = 'decision_reflection.v1';
@@ -333,7 +334,8 @@ export async function evaluateProactiveSchedule({
     // request that cannot return a durable receipt is never replayed blindly.
     const delivery = await sendSystemEmail({
       templateId: 'proactive_decision_reflection', to: schedule.email,
-      vars: { name: clean(schedule.display_name, 100) || 'there', focusTitle, appUrl },
+      vars: { name: clean(schedule.display_name, 100) || 'there', focusTitle, appUrl,
+        locale: await readEmailLocale(prisma, { userId: schedule.user_id, orgId: schedule.org_id }) },
       providerAttempts: 1, providerFallback: false,
     });
     if (!delivery?.ok) {

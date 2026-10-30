@@ -10374,6 +10374,11 @@ const server = http.createServer(async (req, res) => {
         : [];
       const membership = await getOrgMembership(current.session.userId, current.session.orgId);
       const isOrgAdmin = membership?.role === 'owner' || membership?.role === 'admin';
+      if (new URL(req.url, 'http://localhost').searchParams.get('archived') === '1') {
+        // Archived employees are an administrator's Library view; they can unarchive, so only they see the list.
+        const archived = isOrgAdmin && membership?.isActive !== false ? await store.listArchivedForOrg({ orgId: current.session.orgId }) : [];
+        return jsonResponse(res, { employees: archived }, 200, { 'Cache-Control': 'private, no-store' });
+      }
       const employees = isOrgAdmin
         ? await store.listForOrg({ orgId: current.session.orgId })
         : await store.listForUserScope({

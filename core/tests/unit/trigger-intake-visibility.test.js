@@ -36,8 +36,12 @@ test('the intake alarm fires once an hour when subscriptions exist and nothing w
     const db = { $executeRawUnsafe: async () => 0, $queryRawUnsafe: async () => [{ last, subs: 50 }] };
     assert.deepEqual(await checkTriggerIntake(db, { now }), { quietHours: 17 });
     assert.match(warnings[0], /no connected-app event stored/);
-    assert.equal(await checkTriggerIntake(db, { now: now + 60_000 }), null, 'at most hourly');
+    let reads = 0; const counting = { $executeRawUnsafe: async () => 0, $queryRawUnsafe: async () => { reads += 1; return [{ last, subs: 50 }]; } };
+    assert.equal(await checkTriggerIntake(counting, { now: now + 60_000 }), null, 'at most hourly');
+    assert.equal(reads, 0, 'no table scan inside the throttle window');
     last = new Date(now + 2 * 3_600_000 - 60_000).toISOString();
-    assert.equal(await checkTriggerIntake(db, { now: now + 2 * 3_600_000 }), null, 'recent events raise nothing');
+    assert.equal(await checkTriggerIntake(counting, { now: now + 2 * 3_600_000 }), null, 'recent events raise nothing');
+    assert.equal(await checkTriggerIntake(counting, { now: now + 2 * 3_600_000 + 60_000 }), null);
+    assert.equal(reads, 1, 'one scan per 15 minutes');
   } finally { console.warn = warn; }
 });

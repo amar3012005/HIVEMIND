@@ -213,7 +213,6 @@ async function receiveTriggerEventOnce(raw, headers, db) {
   const m = payload.metadata || {};
   const rows = await db.$queryRawUnsafe("SELECT * FROM hivemind_trigger_subscriptions WHERE remote_id=$1 AND account_id=$2 AND slug=$3 AND status='active'", m.trigger_id || '', m.connected_account_id || '', m.trigger_slug || '');
   if (!rows.length) { noteIntake('unknown_trigger', m.trigger_slug); return { ignored: true }; }
-  let stored = 0;
   for (const row of rows) {
     if (m.user_id !== (row.subject || composioConnectionSubject(row.org_id, { userId: row.user_id }))) { noteIntake('subject_mismatch', row.slug); continue; }
     let active;
@@ -233,20 +232,22 @@ async function receiveTriggerEventOnce(raw, headers, db) {
     await db.$executeRawUnsafe(`INSERT INTO hivemind_trigger_events (id,subscription_id,org_id,user_id,data,occurred_at)
       VALUES ($1,$2::uuid,$3,$4,$5::jsonb,$6::timestamptz) ON CONFLICT(id) DO NOTHING`, eventId, row.id, row.org_id, row.user_id, JSON.stringify({ ...payload.data, _hivemind: display }), occurredAt);
     classifyPendingActivity({ orgId: row.org_id, userId: row.user_id, prisma: db, allowedAccountIds: active.map(account => account.id) });
-    noteIntake('stored', row.slug); stored += 1;
+    noteIntake('stored', row.slug);
   }
-  return { accepted: true, stored };
+  return { accepted: true };
 }
-let intakeWarnedAt = 0;
+let intakeWarnedAt = 0, intakeCheckedAt = 0;
 /**
- * Warns, at most hourly, when active subscriptions exist but no connected-app event was stored for `quietMs`, with the
+ * Checks at most every 15 minutes and warns at most hourly when active subscriptions exist but no connected-app event was stored for `quietMs`, with the
  * webhook decisions this process has seen, so the log tells whether Composio stopped sending or the receiver drops events.
  * @param {object} db Prisma client.
  * @param {{now?:number,quietMs?:number}} [options] Clock and quiet window (default 3 h).
  * @returns {Promise<{quietHours:number}|null>} The warning raised, or null.
  */
 export async function checkTriggerIntake(db, { now = Date.now(), quietMs = 3 * 3_600_000 } = {}) {
-  if (now - intakeWarnedAt < 3_600_000) return null;
+  // The table has no global received_at index, so the scan runs at most every 15 minutes and at most hourly after a warning.
+  if (now - intakeWarnedAt < 3_600_000 || now - intakeCheckedAt < 900_000) return null;
+  intakeCheckedAt = now;
   await ensureTriggerStore(db);
   const [state] = await db.$queryRawUnsafe(`SELECT (SELECT max(received_at) FROM hivemind_trigger_events) AS last,
     (SELECT count(*)::int FROM hivemind_trigger_subscriptions WHERE status='active') AS subs`);

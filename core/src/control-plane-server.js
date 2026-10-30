@@ -824,11 +824,14 @@ async function recordHqActivity(prisma, turnId, event) {
 // check both confirmed truthy at runtime. Logging the decision unconditionally
 // (not just the enabled branch) so a future boot proves definitively whether
 // this line is even reached, and with what values.
+// Legacy HyperAgents (hyper rooms, the hm-employees sidecar) are retired: OpenDot employees replaced them. Their sweeper, nightly
+// cycle and transport warmup call the stopped hm-employees service, so they run only when HYPERAGENTS_LEGACY_ENABLED=true.
+const HYPERAGENTS_LEGACY_ENABLED = String(process.env.HYPERAGENTS_LEGACY_ENABLED || 'false').toLowerCase() === 'true';
 console.log('[hyper-sweeper] gate check', {
   prisma_truthy: Boolean(prisma), role: getRuntimeRole(),
-  should_run: shouldRunRecurringMaintenanceJobs(),
+  should_run: shouldRunRecurringMaintenanceJobs(), legacy_enabled: HYPERAGENTS_LEGACY_ENABLED,
 });
-if (prisma && shouldRunRecurringMaintenanceJobs()) {
+if (prisma && HYPERAGENTS_LEGACY_ENABLED && shouldRunRecurringMaintenanceJobs()) {
   const _sweepSeen = new Map();   // turnId -> consecutive empty-tick count
   const _sweepKicked = new Set(); // turnId -> already re-kicked once
   const SWEEP_MS = 15_000;
@@ -1200,7 +1203,7 @@ const HYPER_CYCLE_ENABLED = String(process.env.HYPER_CYCLE_ENABLED || 'false').t
 const HYPER_CYCLE_START_EMAIL_ENABLED = String(process.env.HYPER_CYCLE_START_EMAIL_ENABLED || 'false').toLowerCase() === 'true';
 const HYPER_CYCLE_HOUR_UTC = parseInt(process.env.HYPER_CYCLE_HOUR_UTC || '5', 10); // 05 UTC ≈ 07:00 DE
 const HYPER_DAILY_TOKEN_CAP = parseInt(process.env.HYPER_DAILY_TOKEN_CAP || '200000', 10);
-if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
+if (prisma && HYPERAGENTS_LEGACY_ENABLED && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
   const runNightlyCycle = async () => {
     const today = new Date().toISOString().slice(0, 10);
     const hqRuntimeAvailable = await prisma.$queryRawUnsafe(

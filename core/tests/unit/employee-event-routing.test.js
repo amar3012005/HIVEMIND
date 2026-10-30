@@ -699,3 +699,32 @@ test('the classifier does not wait for routing', async () => {
   assert.equal(outcome, 'done');
   assert.equal(started, 1);
 });
+
+test('Runtime off: the attention layer\'s employee choice routes an event no mention or watch claimed; a mention still wins', async () => {
+  const { db, deliveries, store } = fakeDb();
+  store.events.set('plain', { sender: 'boss@acme.com', sender_verified: true, subject: 'Partner pilot call', message_text: 'Can we talk next week?' });
+  await routeApprovedEvent(db, { orgId: ORG, userId: USER, event: { id: 'plain', data: store.events.get('plain') }, sub }, { config: on, schedule: () => {}, attentionTarget: { employeeId: LEO } });
+  assert.deepEqual(deliveries.map(r => [r.employee_id, r.reason, r.status]), [[LEO, 'attention', 'pending']]);
+  const mentioned = fakeDb();
+  mentioned.store.events.set('m', { sender: 'boss@acme.com', sender_verified: true, subject: '@leo please look', message_text: 'x' });
+  await routeApprovedEvent(mentioned.db, { orgId: ORG, userId: USER, event: { id: 'm', data: mentioned.store.events.get('m') }, sub }, { config: on, schedule: () => {}, attentionTarget: { employeeId: MAYA } });
+  assert.deepEqual(mentioned.deliveries.map(r => [r.employee_id, r.reason]), [[LEO, 'mention']], 'an explicit mention wins over the attention choice');
+  const unknown = fakeDb();
+  unknown.store.events.set('u', { sender: 'boss@acme.com', sender_verified: true, subject: 'x', message_text: 'x' });
+  await routeApprovedEvent(unknown.db, { orgId: ORG, userId: USER, event: { id: 'u', data: unknown.store.events.get('u') }, sub }, { config: on, schedule: () => {}, attentionTarget: { employeeId: '99999999-9999-4999-8999-999999999999' } });
+  assert.equal(unknown.deliveries.filter(r => r.status === 'pending').length, 0, 'a choice outside the routable roster is ignored');
+});
+
+test('every delivered wake carries the attention signal: evidence, provider ids, header and admitted tools', async () => {
+  const { db, store } = fakeDb();
+  const t0 = Date.parse('2026-10-30T09:00:00Z');
+  await mention(7, db, store, t0);
+  store.events.set('ev7', { ...store.events.get('ev7'), message_id: 'msg-7', thread_id: 'thr-7', message_timestamp: '2026-10-30T09:00:00Z' });
+  let sent;
+  await flushEmployeeWakes(db, { config: on, now: t0 + on.coalesceMs + 1000, deliver: async payload => { sent = payload; } });
+  const signal = sent.events[0].signal;
+  assert.equal(signal.evidence.title, '@leo task 7');
+  assert.equal(signal.providerRef.message_id, 'msg-7'); assert.equal(signal.providerRef.thread_id, 'thr-7');
+  assert.equal(signal.signal.app, 'gmail'); assert.equal(signal.signal.subject, '@leo task 7');
+  assert.deepEqual(signal.appTools, { toolkit: 'gmail', slugs: ['GMAIL_FETCH_MESSAGE_BY_THREAD_ID', 'GMAIL_CREATE_EMAIL_DRAFT', 'GMAIL_ADD_LABEL_TO_EMAIL', 'GMAIL_REPLY_TO_THREAD'] });
+});

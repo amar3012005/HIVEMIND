@@ -4,6 +4,7 @@
  * - A Composio trigger that backs no active subscription of an active membership is disabled on Composio (never deleted).
  * - An active subscription whose trigger is missing on Composio is re-created when its connected account is still
  *   ACTIVE; otherwise the subscription is marked `missing`, which every `status='active'` reader already excludes.
+ * - An active subscription whose user row is gone or has no active membership in its org is marked `orphaned`.
  *
  * Dry run computes the same plan and changes nothing. Logs carry counts only, never ids, subjects or configs.
  */
@@ -37,7 +38,7 @@ export async function listComposioTriggers(request) {
  * Build the reconcile plan from both sides.
  * @param {Array<{ id: string }>} remote - Enabled Composio triggers.
  * @param {Array<{ id: string, remote_id: string | null, member_active: boolean }>} subscriptions - Active subscriptions with their membership state.
- * @returns {{ disable: string[], missing: Array<object>, counts: Record<string, number> }}
+ * @returns {{ disable: string[], missing: Array<object>, orphaned: Array<object>, counts: Record<string, number> }}
  */
 export function planTriggerReconcile(remote, subscriptions) {
   const owned = new Set(subscriptions.filter(row => row.member_active && row.remote_id).map(row => row.remote_id));
@@ -45,9 +46,11 @@ export function planTriggerReconcile(remote, subscriptions) {
   const remoteIds = new Set(remote.map(trigger => trigger.id));
   const disable = remote.filter(trigger => !owned.has(trigger.id)).map(trigger => trigger.id);
   const missing = subscriptions.filter(row => row.member_active && (!row.remote_id || !remoteIds.has(row.remote_id)));
+  const orphaned = subscriptions.filter(row => !row.member_active);
   return {
     disable,
     missing,
+    orphaned,
     counts: {
       composioActive: remote.length,
       subscriptionsActive: subscriptions.length,
@@ -73,7 +76,7 @@ export async function reconcileComposioTriggers(db, { dryRun = true, request = t
       EXISTS (SELECT 1 FROM user_organizations uo WHERE uo.user_id::text = s.user_id AND uo.org_id::text = s.org_id AND uo.is_active) AS member_active
     FROM hivemind_trigger_subscriptions s WHERE s.status = 'active'`);
   const plan = planTriggerReconcile(remote, subscriptions);
-  const counts = { dryRun, ...plan.counts, disabled: 0, disableFailed: 0, recreated: 0, markedMissing: 0, recreateFailed: 0, accountActive: 0, accountGone: 0 };
+  const counts = { dryRun, ...plan.counts, disabled: 0, disableFailed: 0, markedOrphaned: 0, recreated: 0, markedMissing: 0, recreateFailed: 0, accountActive: 0, accountGone: 0 };
   const accountActive = new Map();
   for (const row of plan.missing) {
     if (!accountActive.has(row.account_id)) {
@@ -91,6 +94,9 @@ export async function reconcileComposioTriggers(db, { dryRun = true, request = t
     for (const id of plan.disable) {
       try { await request('PATCH', `/trigger_instances/manage/${encodeURIComponent(id)}`, { status: 'disable' }); counts.disabled++; }
       catch { counts.disableFailed++; }
+    }
+    for (const row of plan.orphaned) {
+      counts.markedOrphaned += await db.$executeRawUnsafe("UPDATE hivemind_trigger_subscriptions SET status='orphaned', updated_at=now() WHERE id=$1::uuid AND status='active'", row.id);
     }
     for (const row of plan.missing) {
       if (!accountActive.get(row.account_id)) {

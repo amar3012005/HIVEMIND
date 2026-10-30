@@ -195,3 +195,16 @@ test('pause_archive hides and pauses an employee reversibly; unarchive restores 
   const member={userOrganization:{findUnique:async()=>({isActive:true,role:'member'})},$transaction:async()=>{throw Error('no transaction');}};
   await assert.rejects(manageNativeEmployee(member,principal,{operation:'pause_archive',employee_id:id}),/administrator_membership_required/);
 });
+
+test('the archived list holds only reversibly archived, active-phase employees of the organization', async () => {
+  const { EmployeeStore } = await import('../src/employees/store.js');
+  const rows = [
+    { id:'a', archivedAt:new Date(), policyRules:{ native_lifecycle:{ phase:'active', archive:{ reversible:true } } } },
+    { id:'b', archivedAt:new Date(), policyRules:{ native_lifecycle:{ phase:'archived' } } },
+    { id:'c', archivedAt:new Date(), policyRules:{ native_lifecycle:{ phase:'archived', archive:{ reversible:true } } } },
+  ];
+  let where;
+  const store = new EmployeeStore({ digitalEmployee:{ findMany:async args => { where = args.where; return rows; } } });
+  assert.deepEqual((await store.listArchivedForOrg({ orgId:'org' })).map(row => row.id), ['a']);
+  assert.deepEqual(where, { orgId:'org', archivedAt:{ not:null } });
+});

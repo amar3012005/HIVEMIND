@@ -69,6 +69,16 @@ export class EmployeeStore {
     });
   }
 
+  /** Employees archived reversibly (native lifecycle `pause_archive`); retired employees are never listed. */
+  async listArchivedForOrg({ orgId }) {
+    const rows = await this.prisma.digitalEmployee.findMany({
+      where: { orgId, archivedAt: { not: null } },
+      select: PUBLIC_FIELDS,
+      orderBy: [{ archivedAt: 'desc' }],
+    });
+    return rows.filter(row => row.policyRules?.native_lifecycle?.archive?.reversible === true && row.policyRules.native_lifecycle.phase === 'active');
+  }
+
   async listForUserScope({ userId, orgId, teamIds }) {
     return this.prisma.digitalEmployee.findMany({
       where: {

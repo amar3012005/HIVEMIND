@@ -222,16 +222,24 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
     /// Control's session cookie for Runtime-host requests, reused until shortly before it expires (at most ten minutes).
     private var controlSession: (cookie: HTTPCookie, until: Date)?
     private let controlSessionLock = NSLock()
+    /// Callers that arrive while a /auth/session request is in flight; they all receive its result.
+    private var controlCookieWaiters: [(HTTPCookie?) -> Void] = []
     private func cachedControlCookie(_ completion: @escaping (HTTPCookie?) -> Void) {
-        controlSessionLock.lock(); let cached = controlSession; controlSessionLock.unlock()
-        if let cached = cached, cached.until > Date() { completion(cached.cookie); return }
+        controlSessionLock.lock()
+        if let cached = controlSession, cached.until > Date() { controlSessionLock.unlock(); completion(cached.cookie); return }
+        controlCookieWaiters.append(completion)
+        if controlCookieWaiters.count > 1 { controlSessionLock.unlock(); return }
+        controlSessionLock.unlock()
         controlCookie { cookie in
+            self.controlSessionLock.lock()
             if let cookie = cookie {
                 let limit = Date().addingTimeInterval(600)
                 let until = min(limit, cookie.expiresDate?.addingTimeInterval(-60) ?? limit)
-                self.controlSessionLock.lock(); self.controlSession = (cookie, until); self.controlSessionLock.unlock()
+                self.controlSession = (cookie, until)
             }
-            completion(cookie)
+            let waiters = self.controlCookieWaiters; self.controlCookieWaiters = []
+            self.controlSessionLock.unlock()
+            for waiter in waiters { waiter(cookie) }
         }
     }
     private func send(_ call: CAPPluginCall, _ request: URLRequest) {

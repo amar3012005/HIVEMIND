@@ -257,6 +257,8 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
     // never reaches JavaScript, the Keychain or the Runner cookie jar.
     private let roomHost = "runtime-runner.singulancelabs.com"
     private var room: RoomViewController?
+    /// Path of the room on screen.
+    private var roomPath: String?
     private func controlCookie(_ completion: @escaping (HTTPCookie?) -> Void) {
         guard let token = try? read("cpToken"), let url = URL(string: "https://api.singulancelabs.com/auth/session") else { completion(nil); return }
         var request = URLRequest(url: url)
@@ -273,7 +275,7 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
     /// Asks the existing workspace-access endpoint (feature flag plus account grant) for the signed-in account and returns only its verdict.
     @objc func workspaceAccess(_ call: CAPPluginCall) {
         guard trusted() else { call.reject("Workspace access could not be checked."); return }
-        controlCookie { cookie in
+        cachedControlCookie { cookie in
             guard let cookie = cookie, let url = URL(string: "https://next.singulancelabs.com/__hivemind/account-mode-access") else { call.resolve(["status": 401]); return }
             var request = URLRequest(url: url)
             request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -318,7 +320,7 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
     private func prewarm(path: String?, scope: String?, completion: (() -> Void)? = nil) {
         guard room == nil, let url = roomURL(path), let path = path, (try? read("cpToken")) != nil else { completion?(); return }
         if warmRoom != nil, warmPath == path, warmScope == scope { completion?(); return }
-        controlCookie { cookie in
+        cachedControlCookie { cookie in
             DispatchQueue.main.async {
                 defer { completion?() }
                 guard let cookie = cookie, self.room == nil else { return }
@@ -343,38 +345,50 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
         let scope = roomScope(call.getString("scope"))
         UserDefaults.standard.set(path, forKey: Self.lastRoomPathKey)
         if let scope = scope { UserDefaults.standard.set(scope, forKey: Self.lastRoomScopeKey) } else { UserDefaults.standard.removeObject(forKey: Self.lastRoomScopeKey) }
-        controlCookie { cookie in
-            DispatchQueue.main.async {
-                guard let cookie = cookie else { call.reject("Room could not open."); return }
-                if let open = self.room { open.show(url, cookie: cookie); call.resolve(); return }
-                guard let presenter = self.bridge?.viewController else { call.reject("Room could not open."); return }
-                let controller: RoomViewController
-                if let warm = self.warmRoom, self.warmScope == scope {
-                    controller = warm
-                    self.warmRoom = nil; self.warmPath = nil; self.warmScope = nil
-                } else {
-                    self.discardWarmRoom()
-                    controller = RoomViewController(allowedHosts: [self.roomHost, "dots.singulancelabs.com"], scope: scope) { [weak self] in
-                        self?.room = nil
-                        self?.notifyListeners("roomClosed", data: [:])
+        DispatchQueue.main.async {
+            guard let presenter = self.bridge?.viewController else { call.reject("Room could not open."); return }
+            // A room already rendered for this path and scope is shown at once; it already holds its session cookie.
+            let warmMatches = self.warmRoom != nil && self.warmPath == path && self.warmScope == scope && self.warmRoom?.failed == false
+            let controller: RoomViewController
+            if let open = self.room { controller = open }
+            else if let warm = self.warmRoom, self.warmScope == scope {
+                controller = warm
+                self.warmRoom = nil; self.warmPath = nil; self.warmScope = nil
+            } else {
+                self.discardWarmRoom()
+                controller = RoomViewController(allowedHosts: [self.roomHost, "dots.singulancelabs.com"], scope: scope) { }
+            }
+            controller.onClose = { [weak self] in
+                self?.room = nil; self?.roomPath = nil
+                self?.notifyListeners("roomClosed", data: [:])
+                self?.prewarm(path: path, scope: scope)
+            }
+            let load = {
+                if warmMatches { return }
+                self.cachedControlCookie { cookie in
+                    DispatchQueue.main.async {
+                        guard let cookie = cookie else { controller.closeAfterFailure(); return }
+                        controller.show(url, cookie: cookie)
                     }
                 }
-                controller.onClose = { [weak self] in
-                    self?.room = nil
-                    self?.notifyListeners("roomClosed", data: [:])
-                    self?.prewarm(path: path, scope: scope)
-                }
-                self.room = controller
-                controller.modalPresentationStyle = .fullScreen
-                presenter.present(controller, animated: true) { controller.show(url, cookie: cookie); call.resolve() }
             }
+            self.roomPath = path
+            if self.room === controller { load(); call.resolve(); return }
+            self.room = controller
+            controller.modalPresentationStyle = .fullScreen
+            // Present first: the room's own loading screen (cached name and look) appears while the cookie and page arrive.
+            presenter.present(controller, animated: true) { call.resolve() }
+            load()
         }
     }
     @objc func closeRoom(_ call: CAPPluginCall) {
         DispatchQueue.main.async {
             guard self.trusted() else { call.reject("Room could not close."); return }
+            // A page that names its room closes only that room: when the person taps another employee, the new room
+            // opens before the previous page goes away, and that page must not close it.
+            if let path = call.getString("path"), path != self.roomPath { call.resolve(); return }
             self.room?.closeSilently()
-            self.room = nil
+            self.room = nil; self.roomPath = nil
             call.resolve()
         }
     }
@@ -517,30 +531,33 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(red: 0.98, green: 0.976, blue: 0.957, alpha: 1)
-        let done = UIButton(type: .system)
-        done.setTitle("Done", for: .normal)
-        done.titleLabel?.font = .preferredFont(forTextStyle: .headline)
-        done.accessibilityIdentifier = "room-done"
-        done.addTarget(self, action: #selector(finish), for: .touchUpInside)
-        done.translatesAutoresizingMaskIntoConstraints = false
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        webView.isOpaque = false
+        webView.backgroundColor = view.backgroundColor
         webView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(done)
         view.addSubview(webView)
+        // The room draws its own header (back, avatar and name) under the status bar; the web view fills the screen
+        // below the top safe area so that header sits at the top, as in the app's other screens.
         NSLayoutConstraint.activate([
-            done.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
-            done.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            done.heightAnchor.constraint(equalToConstant: 36),
-            webView.topAnchor.constraint(equalTo: done.bottomAnchor, constant: 4),
+            webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+        let edge = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(edgeSwipe(_:)))
+        edge.edges = .left
+        edge.accessibilityLabel = "room-edge-back"
+        view.addGestureRecognizer(edge)
     }
+    @objc private func edgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        if gesture.state == .ended, gesture.translation(in: view).x > 60 { finish() }
+    }
+    /// The session could not be established: close the room and report it closed.
+    func closeAfterFailure() { finish() }
     func show(_ url: URL, cookie: HTTPCookie) {
         loadViewIfNeeded()
-        let alreadyLoaded = loadedURL == url
+        let alreadyLoaded = loadedURL == url && !failed
         loadedURL = url
         webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) { if !alreadyLoaded { self.webView.load(URLRequest(url: url)) } }
     }
@@ -558,6 +575,9 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
         store.getAllCookies { cookies in for cookie in cookies where cookie.name == "hm_cp_session" { store.delete(cookie) } }
     }
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        #if DEBUG
+        NSLog("[room-message] main=%d host=%@ body=%@", message.frameInfo.isMainFrame ? 1 : 0, message.frameInfo.request.url?.host ?? "-", String(describing: message.body))
+        #endif
         guard message.frameInfo.isMainFrame, let host = message.frameInfo.request.url?.host, allowedHosts.contains(host),
               let body = message.body as? [String: Any], body["version"] as? Int == 1, body["type"] as? String == "hivemind.open-dot.back" else { return }
         finish()
@@ -568,6 +588,12 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
         let allowed = url.scheme == "about" || (url.scheme == "https" && url.port == nil && allowedHosts.contains(url.host ?? ""))
         decisionHandler(allowed ? .allow : .cancel)
+    }
+    /// The last main-frame response was an error (for example a warm load that raced its session cookie).
+    private(set) var failed = false
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        if navigationResponse.isForMainFrame, let http = navigationResponse.response as? HTTPURLResponse { failed = http.statusCode >= 400 }
+        decisionHandler(.allow)
     }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
 }

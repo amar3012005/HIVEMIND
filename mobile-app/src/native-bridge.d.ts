@@ -15,6 +15,12 @@ export interface SingulanceNative {
     /** Injects securely stored CP bearer only for api.singulancelabs.com. */
     authorize?: boolean;
   }): Promise<{status: number; headers: Record<string,string>; data: string; encoding?: 'text' | 'base64'}>;
+  /** Asks the account workspace-access endpoint (flag plus grant) with the stored session; only the verdict returns. */
+  workspaceAccess(): Promise<{status: number; enabled?: boolean}>;
+  /** iOS: opens `/employees/<uuid>` of the OpenDot Runtime host full screen in an isolated web view signed in with the stored session. */
+  openRoom(options: {path: string}): Promise<void>;
+  closeRoom(): Promise<void>;
+  addListener(event: 'roomClosed', listener: () => void): Promise<{remove():Promise<void>}>;
   /** User-initiated OS document picker. No filesystem path/URI accepted. Max 20 MiB. */
   saveFile(options: {name: string; mimeType: string; dataBase64: string}): Promise<{saved:boolean}>;
   /** Opens one logical Remote stream over a fixed native WebSocket. */

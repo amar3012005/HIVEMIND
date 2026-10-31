@@ -9,7 +9,7 @@ import AuthenticationServices
 public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTaskDelegate, UIDocumentPickerDelegate, ASWebAuthenticationPresentationContextProviding {
     public let identifier = "SingulanceNativePlugin"
     public let jsName = "SingulanceNative"
-    public let pluginMethods: [CAPPluginMethod] = ["authenticate", "setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
+    public let pluginMethods: [CAPPluginMethod] = ["authenticate", "setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance", "workspaceAccess", "openRoom", "closeRoom"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
     private var authenticationSession: ASWebAuthenticationSession?
     public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         return bridge!.viewController!.view.window!
@@ -163,6 +163,69 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
             }.resume()
         } catch { call.reject("Native request is not allowed.") }
     }
+    // OpenDot employee rooms are a separate web application (https://runtime-runner.singulancelabs.com) that
+    // refuses to be framed by capacitor://localhost and authenticates a Control session cookie. The room
+    // therefore opens in its own top-level WKWebView with an isolated data store. The cookie is Control's own
+    // Set-Cookie for the stored bearer (GET /auth/session); it goes from this class to that web view and
+    // never reaches JavaScript, the Keychain or the Runner cookie jar.
+    private let roomHost = "runtime-runner.singulancelabs.com"
+    private var room: RoomViewController?
+    private func controlCookie(_ completion: @escaping (HTTPCookie?) -> Void) {
+        guard let token = try? read("cpToken"), let url = URL(string: "https://api.singulancelabs.com/auth/session") else { completion(nil); return }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpShouldHandleCookies = false
+        session.dataTask(with: request) { _, response, error in
+            guard error == nil, let http = response as? HTTPURLResponse, http.statusCode == 200 else { completion(nil); return }
+            var fields: [String: String] = [:]
+            for (key, value) in http.allHeaderFields { if let key = key as? String, let value = value as? String { fields[key] = value } }
+            completion(HTTPCookie.cookies(withResponseHeaderFields: fields, for: url).first { $0.name == "hm_cp_session" && $0.isSecure })
+        }.resume()
+    }
+    /// Asks the existing workspace-access endpoint (feature flag plus account grant) for the signed-in account and returns only its verdict.
+    @objc func workspaceAccess(_ call: CAPPluginCall) {
+        guard trusted() else { call.reject("Workspace access could not be checked."); return }
+        controlCookie { cookie in
+            guard let cookie = cookie, let url = URL(string: "https://next.singulancelabs.com/__hivemind/account-mode-access") else { call.resolve(["status": 401]); return }
+            var request = URLRequest(url: url)
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.httpShouldHandleCookies = false
+            for (name, value) in HTTPCookie.requestHeaderFields(with: [cookie]) { request.setValue(value, forHTTPHeaderField: name) }
+            self.session.dataTask(with: request) { data, response, error in
+                guard error == nil, let http = response as? HTTPURLResponse else { call.reject("Workspace access could not be checked."); return }
+                let enabled = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any])?["enabled"] as? Bool
+                call.resolve(enabled == nil ? ["status": http.statusCode] : ["status": http.statusCode, "enabled": enabled!])
+            }.resume()
+        }
+    }
+    @objc func openRoom(_ call: CAPPluginCall) {
+        guard trusted(), let path = call.getString("path"),
+              path.range(of: "^/employees/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", options: .regularExpression) != nil,
+              let url = URL(string: "https://" + roomHost + path + "?embed=hivemind") else { call.reject("Room is not allowed."); return }
+        controlCookie { cookie in
+            DispatchQueue.main.async {
+                guard let cookie = cookie else { call.reject("Room could not open."); return }
+                if let open = self.room { open.show(url, cookie: cookie); call.resolve(); return }
+                guard let presenter = self.bridge?.viewController else { call.reject("Room could not open."); return }
+                let controller = RoomViewController(allowedHosts: [self.roomHost, "dots.singulancelabs.com"]) { [weak self] in
+                    self?.room = nil
+                    self?.notifyListeners("roomClosed", data: [:])
+                }
+                self.room = controller
+                controller.modalPresentationStyle = .fullScreen
+                presenter.present(controller, animated: true) { controller.show(url, cookie: cookie); call.resolve() }
+            }
+        }
+    }
+    @objc func closeRoom(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            guard self.trusted() else { call.reject("Room could not close."); return }
+            self.room?.closeSilently()
+            self.room = nil
+            call.resolve()
+        }
+    }
     public func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
     private func event(_ id: String, _ type: String, _ data: String? = nil) {
         var event: [String: Any] = ["id": id, "type": type]; if let data = data { event["data"] = data }; notifyListeners("streamEvent", data: event)
@@ -237,6 +300,59 @@ private class TrustedFrameHandler: NSObject, WKScriptMessageHandler {
               url.scheme == "capacitor", url.host == "localhost", url.port == nil, url.user == nil else { return }
         delegate.userContentController(userContentController, didReceive: message)
     }
+}
+/// Full-screen host for one OpenDot room: isolated storage, https navigation limited to the room's own hosts, no new windows.
+private final class RoomViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
+    private let allowedHosts: [String]
+    private let onClose: () -> Void
+    private var silent = false
+    private let webView: WKWebView
+    init(allowedHosts: [String], onClose: @escaping () -> Void) {
+        self.allowedHosts = allowedHosts
+        self.onClose = onClose
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.allowsInlineMediaPlayback = true
+        webView = WKWebView(frame: .zero, configuration: configuration)
+        super.init(nibName: nil, bundle: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = UIColor(red: 0.98, green: 0.976, blue: 0.957, alpha: 1)
+        let done = UIButton(type: .system)
+        done.setTitle("Done", for: .normal)
+        done.titleLabel?.font = .preferredFont(forTextStyle: .headline)
+        done.accessibilityIdentifier = "room-done"
+        done.addTarget(self, action: #selector(finish), for: .touchUpInside)
+        done.translatesAutoresizingMaskIntoConstraints = false
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(done)
+        view.addSubview(webView)
+        NSLayoutConstraint.activate([
+            done.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
+            done.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            done.heightAnchor.constraint(equalToConstant: 36),
+            webView.topAnchor.constraint(equalTo: done.bottomAnchor, constant: 4),
+            webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+    }
+    func show(_ url: URL, cookie: HTTPCookie) {
+        loadViewIfNeeded()
+        webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) { self.webView.load(URLRequest(url: url)) }
+    }
+    func closeSilently() { silent = true; webView.stopLoading(); dismiss(animated: true) }
+    @objc private func finish() { webView.stopLoading(); dismiss(animated: true) { self.onClose() } }
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
+        let allowed = url.scheme == "about" || (url.scheme == "https" && url.port == nil && allowedHosts.contains(url.host ?? ""))
+        decisionHandler(allowed ? .allow : .cancel)
+    }
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
 }
 class SingulanceViewController: CAPBridgeViewController {
     override func capacitorDidLoad() {

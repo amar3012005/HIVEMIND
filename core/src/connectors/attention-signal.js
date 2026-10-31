@@ -12,6 +12,7 @@ const text = (value, max) => (typeof value === 'string' ? value : value === unde
 export const DEFAULT_SIGNAL_TOOL_SLUGS = Object.freeze({
   gmail: ['GMAIL_FETCH_MESSAGE_BY_THREAD_ID', 'GMAIL_CREATE_EMAIL_DRAFT', 'GMAIL_ADD_LABEL_TO_EMAIL', 'GMAIL_REPLY_TO_THREAD'],
   googlecalendar: ['GOOGLECALENDAR_EVENTS_GET', 'GOOGLECALENDAR_FIND_FREE_SLOTS'],
+  github: ['GITHUB_GET_A_PULL_REQUEST', 'GITHUB_LIST_PULL_REQUESTS_FILES', 'GITHUB_GET_AN_ISSUE', 'GITHUB_CREATE_AN_ISSUE_COMMENT'],
   linkedin: ['LINKEDIN_GET_POST_CONTENT'],
 });
 /** Most tool slugs named for one signal (Runtime maxTools default). */
@@ -100,14 +101,21 @@ export function signalToolSlugs(toolkit, slugs = DEFAULT_SIGNAL_TOOL_SLUGS) {
   return (slugs[String(toolkit).toLowerCase()] ?? []).filter(slug => slug.startsWith(prefix)).slice(0, MAX_SIGNAL_TOOLS);
 }
 
+const SLUG = /^[A-Z0-9]+(?:_[A-Z0-9]+)+$/u;
 /**
- * The full signal for one event.
+ * The full signal for one event. When Runtime's attention judged it for the employees (`attentionForEmployees`), the assessment and
+ * the tool slugs are that verdict's; otherwise the stored decision's assessment and the default slugs of the toolkit.
  * @param {{toolkit:string,data:unknown,decision?:object,routedBecause?:string}} input Event and its stored decision.
  * @returns {{evidence:object,providerRef:object,signal:object,assessment:object,appTools?:object,routedBecause?:string}} The signal.
  */
 export function attentionSignal({ toolkit, data, decision, routedBecause }) {
   const evidence = attentionEvidence(data);
-  const slugs = signalToolSlugs(toolkit);
+  const verdict = object(decision?.attentionForEmployees) ? decision.attentionForEmployees : undefined;
+  const prefix = `${String(toolkit).toUpperCase()}_`;
+  const slugs = Array.isArray(verdict?.toolSlugs)
+    ? verdict.toolSlugs.filter(slug => typeof slug === 'string' && SLUG.test(slug) && slug.startsWith(prefix)).slice(0, MAX_SIGNAL_TOOLS)
+    : signalToolSlugs(toolkit);
+  decision = verdict ?? decision;
   return { evidence, providerRef: attentionProviderRef(toolkit, data), signal: signalHeader(data, toolkit, evidence.preview.length),
     assessment: signalAssessment(decision), ...(slugs.length ? { appTools: { toolkit: String(toolkit).toLowerCase(), slugs } } : {}),
     ...(routedBecause ? { routedBecause: text(routedBecause, 300) } : {}) };

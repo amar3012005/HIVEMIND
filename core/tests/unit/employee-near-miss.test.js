@@ -17,7 +17,7 @@ test('the near-miss probability is configurable and bounded', () => {
 const decide = result => decideActivityRelevance({ event: { toolkit: 'gmail', data: { subject: 'Pricing', message_text: 'Can we talk' } }, context: {}, env: {}, provider: { decideChoice: async () => result } });
 
 function classify({ decision, runtimeOn, target, routerCalls, writes, config = on, targeterCalls = [] }) {
-  const row = { id: 'ev', subscription_id: 'sub', org_id: ORG, user_id: USER, received_at: '2026-10-30T12:00:00Z', data: { sender: 'a@b.co', subject: 'Pricing', message_text: 'Can we talk' } };
+  const row = { id: 'ev', subscription_id: 'sub', org_id: ORG, user_id: USER, received_at: new Date(Date.now() - 60_000).toISOString(), data: { sender: 'a@b.co', subject: 'Pricing', message_text: 'Can we talk' } };
   const db = {
     userOrganization: { findUnique: async () => ({ isActive: true, role: 'admin' }) },
     organization: { findUnique: async () => ({ name: 'Acme', companyProfile: {} }) },

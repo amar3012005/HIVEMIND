@@ -49,11 +49,12 @@ function fakeDb({ watches = [], runtimeOn = false } = {}) {
       if (sql.includes('FROM hivemind_employee_watches WHERE org_id=$1 AND toolkit')) return watches;
       if (sql.includes('GROUP BY org_id,employee_id')) return [];
       if (sql.includes("SET status='forwarding'")) {
-        const rows = deliveries.filter(row => row.employee_id === a[0] && row.status === 'forward_pending' && (!row.retry_at || row.retry_at <= new Date(a[1])));
+        const rows = deliveries.filter(row => row.employee_id === a[0] && row.status === 'forward_pending' && (!row.retry_at || row.retry_at <= new Date(a[1])) && (a[3] === 'infinity' || row.created_at <= new Date(a[3])));
         for (const row of rows) { row.status = 'forwarding'; row.attempts += 1; }
         return rows.map(row => ({ ...row }));
       }
-      if (sql.includes('FROM hivemind_trigger_events e')) return events.has(a[0]) ? [{ id: a[0], data: events.get(a[0]), occurred_at: null, received_at: new Date('2026-10-31T10:00:00Z'), relevance_decision: { status: 'approved' }, subject: USER }] : [];
+      if (sql.includes('SELECT min(created_at)')) { const open = deliveries.filter(row => row.employee_id === a[0] && row.status === 'forward_pending'); return [{ at: open.length ? new Date(Math.min(...open.map(row => row.created_at.getTime()))) : null }]; }
+      if (sql.includes('FROM hivemind_trigger_events e')) return events.has(a[0]) ? [{ id: a[0], data: events.get(a[0]), occurred_at: null, received_at: log.receivedAt ?? new Date(Date.now() - 60_000), relevance_decision: log.decision ?? { status: 'approved' }, subject: USER }] : [];
       throw new Error(`unexpected query: ${sql}`);
     },
   };
@@ -150,4 +151,37 @@ test('on, other companies: an organization not on the list keeps Core routing', 
   const decision = await routeApprovedEvent(db, { orgId: otherOrg, userId: USER, event: { id: 'ev1', data: mail }, sub }, { config: forward, schedule: () => {} });
   assert.ok(Array.isArray(decision.targets));
   assert.ok(deliveries.every(row => row.employee_id !== FORWARDED));
+});
+
+const coalescing = routingConfig({ ...env, HIVEMIND_EMPLOYEE_EVENT_FORWARD_ORGS: ORG, HIVEMIND_EMPLOYEE_EVENT_FORWARD_COALESCE_MS: '60000' });
+const ghSub = { toolkit: 'github', slug: 'GITHUB_PULL_REQUEST_CREATED', subject: USER };
+const pr = n => ({ pull_request: { title: `PR ${n}`, body: 'Bump deps', user: { login: 'bot-ish' } }, repository: { full_name: 'acme/app' } });
+
+test('coalescing: approved events of one source inside the window go to OpenDot as one request carrying the burst; a mention goes alone', async () => {
+  const { db, deliveries, events } = fakeDb();
+  for (const n of [1, 2, 3]) { events.set(`pr${n}`, pr(n)); await routeApprovedEvent(db, { orgId: ORG, userId: USER, event: { id: `pr${n}`, data: pr(n) }, sub: ghSub }, { config: coalescing, schedule: () => {} }); }
+  events.set('ev1', mail);
+  await routeApprovedEvent(db, { orgId: ORG, userId: USER, event: { id: 'ev1', data: mail }, sub }, { config: coalescing, schedule: () => {} });
+  const sent = [], scheduled = [];
+  await flushEmployeeWakes(db, { config: coalescing, now: Date.now(), forward: async r => { sent.push(r); return {}; }, schedule: delay => scheduled.push(delay) });
+  assert.equal(sent.length, 0, 'nothing leaves before the window');
+  assert.equal(scheduled.length, 1, 'a flush is timed for the oldest waiting row');
+  await flushEmployeeWakes(db, { config: coalescing, now: Date.now() + 61_000, forward: async r => { sent.push(r); return { outcome: 'woken' }; }, schedule: () => {} });
+  assert.equal(sent.length, 2, 'one request for the burst, one for the mention');
+  const burst = sent.find(r => r.event.toolkit === 'github');
+  assert.deepEqual(burst.event.burst, { count: 3, eventIds: ['pr1', 'pr2', 'pr3'], titles: ['PR 1', 'PR 2', 'PR 3'] });
+  assert.equal(sent.find(r => r.event.toolkit === 'gmail').event.burst, undefined);
+  assert.deepEqual(deliveries.filter(r => r.toolkit === 'github').map(r => [r.status, r.skip_reason]), [['forwarded', 'woken'], ['forwarded', 'coalesced'], ['forwarded', 'coalesced']]);
+});
+
+test('live only: a forwarded event that happened longer ago than the age limit is skipped as too old, never sent', async () => {
+  const { db, deliveries, events, log } = fakeDb();
+  events.set('old', mail);
+  log.receivedAt = new Date(Date.now() - 11 * 60_000);
+  await routeApprovedEvent(db, { orgId: ORG, userId: USER, event: { id: 'old', data: mail }, sub }, { config: forward, schedule: () => {} });
+  let calls = 0;
+  const totals = await flushEmployeeWakes(db, { config: forward, forward: async () => { calls += 1; return {}; } });
+  assert.equal(calls, 0);
+  assert.equal(totals.tooOld, 1);
+  assert.deepEqual([deliveries[0].status, deliveries[0].skip_reason], ['skipped', 'too_old']);
 });

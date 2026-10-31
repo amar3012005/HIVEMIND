@@ -4,7 +4,7 @@ import { decisionGatewayProviderConfig } from '../../agent/decision-gateway-serv
 import { createWorkspaceNotification } from '../../workspace/notifications.js';
 import { createRuntimeAttentionBridge } from './runtime-attention-bridge.js';
 import { readRuntimeEnabled } from '../../organizations/runtime-setting.js';
-import { loadRoutableEmployees, routeEventGuarded, routingConfig } from '../employee-event-routing.js';
+import { attentionEmployeeMode, eventTooOld, loadRoutableEmployees, routeEventGuarded, routingConfig } from '../employee-event-routing.js';
 import { decideEmployeeTarget, loadEmployeeRoster, EMPLOYEE_TARGET_POLICY } from './employee-attention-target.js';
 
 export const ACTIVITY_RELEVANCE_POLICY = 'company_activity_relevance_v3';
@@ -78,6 +78,18 @@ async function deliverAttention(db,ctx,row,receipt,bridge,toolkit) {
           await db.$executeRawUnsafe("UPDATE hivemind_trigger_events SET relevance_status='approved',relevance_decision=jsonb_set(relevance_decision,'{runtimeDelivery}',$1::jsonb),evaluated_at=now() WHERE id=$2", JSON.stringify(delivery), row.id);
 }
 
+/**
+ * Runtime's attention verdict for a Runtime-off company's employees, or why it is not available.
+ * @param {object|undefined} bridge Runtime attention bridge.
+ * @param {object} row Event row.
+ * @returns {Promise<{verdict?:object,unavailable?:string}>} The verdict, or the reason the company relevance check is used instead.
+ */
+export async function judgeForEmployees(bridge, row) {
+  if (!bridge?.assessForEmployees) return { unavailable: 'bridge_unconfigured' };
+  try { return { verdict: await bridge.assessForEmployees(row) }; }
+  catch (error) { return { unavailable: clip(error?.message, 80) || 'runtime_attention_unavailable' }; }
+}
+
 // Durable leases recover interrupted classifications. No classifier runs while
 // rendering the page; only approved receipts can enter the suggestion response.
 export function classifyPendingActivity(ctx) {
@@ -115,6 +127,12 @@ export function classifyPendingActivity(ctx) {
       for (const row of rows) {
         const sub = await db.$queryRawUnsafe(`SELECT toolkit,${routing.enabled ? 'slug,subject,' : ''}runtime_attention,runtime_attention_enabled_at FROM hivemind_trigger_subscriptions WHERE id=$1::uuid AND org_id=$2 AND user_id=$3 AND status='active' AND account_id=ANY($4::text[])`, row.subscription_id, ctx.orgId, ctx.userId, allowedAccountIds);
         if (!sub.length) continue;
+        // Only live events wake employees or Runtime: one that happened longer ago than the limit is recorded as too old and routed nowhere.
+        if (eventTooOld(row, routing)) {
+          await db.$executeRawUnsafe(`UPDATE hivemind_trigger_events SET relevance_status='rejected',relevance_decision=$1::jsonb,evaluated_at=now() WHERE id=$2`,
+            JSON.stringify({ policy: POLICY, status: 'rejected', source: 'too_old', tooOld: true, maxEventAgeMs: routing.maxEventAgeMs }), row.id);
+          continue;
+        }
         // With employee routing switched on, a company with Runtime switched off has no Chief of Staff to assess or receive events and takes the company relevance path.
         // With it switched off nothing here differs from before.
         const runtimeOn = routing.enabled ? await readRuntimeEnabled(db, ctx.orgId).catch(() => true) : true;
@@ -139,15 +157,32 @@ export function classifyPendingActivity(ctx) {
           receipt = { policy: POLICY, status: unavailable ? 'pending' : attention.action === 'retain' ? 'rejected' : 'approved',
             source: 'runtime_attention', runtimeAttention: attention };
         } else {
-          const context=await companyContext(ctx);
-          receipt = await (ctx.relevanceDecider || decideActivityRelevance)({ event: { ...row, toolkit: sub[0].toolkit }, context });
-          // Runtime off and the company sees every event: the classifier's verdict is kept for the record, nothing is rejected.
-          if (!runtimeOn && receipt.status === 'rejected' && routing.deliverAllOrgs?.has(String(ctx.orgId).toLowerCase())) {
-            receipt = { ...receipt, status: 'approved', deliveredAll: true, classifierStatus: 'rejected' };
+          // Runtime off: Runtime's attention layer judges the event for the employees. Shadow organizations keep the company relevance
+          // verdict for delivery and store Runtime's next to it; active organizations are delivered on Runtime's, and the company
+          // relevance check runs only when that verdict cannot be had (bridge unconfigured or unreachable, or the decision unavailable).
+          const employeeMode = !runtimeOn && routing.enabled ? attentionEmployeeMode(routing, ctx.orgId) : 'off';
+          const judged = employeeMode === 'off' ? null : await judgeForEmployees(ctx.runtimeAttention || createRuntimeAttentionBridge(), row);
+          const deliverAll = !runtimeOn && routing.deliverAllOrgs?.has(String(ctx.orgId).toLowerCase()) === true;
+          let context;
+          if (employeeMode === 'active' && judged.verdict) {
+            const verdict = judged.verdict;
+            // Notify and wake are approved; a company that sees every event has a retain turned into a delivery, the verdict kept.
+            receipt = { policy: POLICY, status: verdict.action !== 'retain' || deliverAll ? 'approved' : 'rejected', source: 'runtime_attention_employees',
+              attentionForEmployees: verdict, ...(verdict.action === 'retain' && deliverAll ? { deliveredAll: true, attentionAction: 'retain' } : {}) };
+          } else {
+            context = await companyContext(ctx);
+            receipt = await (ctx.relevanceDecider || decideActivityRelevance)({ event: { ...row, toolkit: sub[0].toolkit }, context });
+            // Runtime off and the company sees every event: the classifier's verdict is kept for the record, nothing is rejected.
+            if (deliverAll && receipt.status === 'rejected') {
+              receipt = { ...receipt, status: 'approved', deliveredAll: true, classifierStatus: 'rejected' };
+            }
+            if (employeeMode === 'active') receipt = { ...receipt, attentionFallback: judged.unavailable };
+            if (employeeMode === 'shadow') receipt = { ...receipt, shadowRuntimeAttention: judged.verdict ?? { unavailable: judged.unavailable } };
           }
           // Runtime off: the same attention step also picks the employee whose role or recent work owns the event. A near miss
           // (useful company work below the approval confidence) is promoted only when an employee clearly owns it.
           if (routing.enabled && !forwarded && !runtimeOn && (receipt.status === 'approved' || receipt.nearMiss === true)) {
+            context ??= await companyContext(ctx);
             const target = await (ctx.employeeTargeter || (async () => decideEmployeeTarget({ event: { app: sub[0].toolkit, title: clip(row.data?._hivemind?.title || row.data?.subject || row.data?.title, 200), sender: clip(row.data?.sender || row.data?.from, 120), preview: connectedEventPreview(row.data || {}, 900) },
               roster: await loadEmployeeRoster(db, ctx.orgId, await loadRoutableEmployees(db, ctx.orgId, ctx.userId)), company: { company: context.company } })))().catch(() => null);
             if (target) receipt = { ...receipt, ...(receipt.status === 'approved' ? {} : { status: 'approved', promotedByOwner: true }), employeeAttention: { policy: EMPLOYEE_TARGET_POLICY, targetEmployeeId: target.employeeId, probability: target.probability, margin: target.margin, because: target.because } };

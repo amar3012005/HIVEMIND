@@ -17,6 +17,7 @@ import { CloudflareKnowledgeIngestClient } from './knowledge/cloudflare-ingest-c
 import { handleOrganizationSettings } from './billing/organization-policy.js';
 import { handleRuntimeSettingRoute, readRuntimeEnabled } from './organizations/runtime-setting.js';
 import { recoverPendingActivity } from './connectors/composio/activity-relevance.js';
+import { routingConfig } from './connectors/employee-event-routing.js';
 import { changeSessionOrganization } from './mobile/session-organization.js';
 import {resolveNativeSlackSource,admitNativeSlackSignal,verifyDreamSignalToken,admitDreamSignal} from './connectors/runtime-signal-hub.js';
 import { requireReconciledSourceErasure } from './security/account-erasure-inventory.js';
@@ -1341,6 +1342,8 @@ if (prisma && HYPERAGENTS_LEGACY_ENABLED && HYPER_CYCLE_ENABLED && shouldRunRecu
   console.log(`[hyper-cycle] nightly operating cycle armed (hour=${HYPER_CYCLE_HOUR_UTC} UTC, cap=${HYPER_DAILY_TOKEN_CAP} tok/org/day, start-email=${HYPER_CYCLE_START_EMAIL_ENABLED ? 'enabled' : 'disabled'})`);
 }
 
+// A malformed employee-routing or attention setting fails the start, not the first event.
+routingConfig();
 // Recovery uses the same durable attention ledger; no page visit is required.
 if (prisma && shouldRunRecurringMaintenanceJobs()) {
   import('./connectors/composio/runtime-attention-bridge.js').then(({ describeRuntimeAttentionConfig }) => {
@@ -10645,6 +10648,12 @@ const server = http.createServer(async (req, res) => {
       if (action === 'search') {
         const useCase = String(body.use_case || '').trim().slice(0, 1200);
         if (!useCase) return jsonResponse(res, { error: 'use_case is required' }, 400, privateHeaders);
+        // Exact tool slugs (an attention signal's tool hints) skip the semantic search; their official schemas are still fetched.
+        const exactSlugs = body.tool_slugs === undefined ? [] : body.tool_slugs;
+        if (!Array.isArray(exactSlugs) || exactSlugs.length > 8
+          || exactSlugs.some(slug => typeof slug !== 'string' || !/^[A-Z0-9]+(?:_[A-Z0-9]+)+$/u.test(slug) || !slug.startsWith(`${toolkit.replace(/[^a-z0-9]/gi, '').toUpperCase()}_`))) {
+          return jsonResponse(res, { error: 'tool_slugs must be up to 8 exact slugs of this toolkit' }, 400, privateHeaders);
+        }
         const accounts = await composioService.listConnectedAccounts(principal.orgId, { userId: principal.userId });
         // The Composio session below is bound to the subject chosen for this toolkit
         // (see getToolRouterSession), so search, schemas and reads share one subject.
@@ -10679,6 +10688,7 @@ const server = http.createServer(async (req, res) => {
           discovered = await composioService.discoverSessionTools(principal.orgId, {
             toolkits: [toolkit], useCases: [useCase], userId: principal.userId,
             allowDisconnected: true, hydrateSchemas: true, manageConnections: false,
+            ...(exactSlugs.length ? { exactToolSlugs: exactSlugs } : {}),
             ...(String(body.known_fields || '').trim() ? { searchPayload: {
               session: { generate_id: true }, queries: [{ use_case: useCase, known_fields: String(body.known_fields).trim().slice(0, 1200) }],
             } } : {}),

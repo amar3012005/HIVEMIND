@@ -1,10 +1,22 @@
 /** Existing receiver calls this narrow native service seam. No connector subscriptions or model work here. */
 import { createHmac, randomUUID } from 'node:crypto';
-export function runtimeAttentionToken(row, operation, secret, now = Date.now()) {
+/** Verdict actions an `employees` assessment may answer. */
+const EMPLOYEE_ACTIONS = new Set(['retain', 'notify', 'wake']);
+/**
+ * Signed service token for one attention operation on one event.
+ * @param {{id:string,org_id:string,user_id:string}} row Event row.
+ * @param {'context'|'assess'|'deliver'} operation Operation the token is bound to.
+ * @param {string} secret Runner service secret.
+ * @param {number} [now] Clock in milliseconds.
+ * @param {'runtime'|'employees'} [destination] Who acts on the verdict; `employees` is signed as a claim, `runtime` is the claim's absence.
+ * @returns {string} Bearer token.
+ */
+export function runtimeAttentionToken(row, operation, secret, now = Date.now(), destination = 'runtime') {
   const at = Math.floor(now / 1000);
   const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
   const claims = { iss: 'hivemind-control-plane', aud: 'hivemind-runtime-attention', sub: row.user_id,
-    org_id: row.org_id, event_id: row.id, operation, iat: at, exp: at + 30, jti: randomUUID() };
+    org_id: row.org_id, event_id: row.id, operation, iat: at, exp: at + 30, jti: randomUUID(),
+    ...(destination === 'employees' ? { destination } : {}) };
   const input = `${encode({ alg: 'HS256', typ: 'JWT' })}.${encode(claims)}`;
   return `${input}.${createHmac('sha256', secret).update(input).digest('base64url')}`;
 }
@@ -39,10 +51,11 @@ export function createRuntimeAttentionBridge({ env = process.env, fetchImpl = fe
   try { url = new URL(configured); } catch { return undefined; }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
     || url.pathname !== '/internal/hivemind/runtime-attention' || url.search || url.hash) return undefined;
-  async function call(operation, row) {
+  async function call(operation, row, destination = 'runtime') {
+    // A Runtime destination sends no destination field, so a runner that predates it keeps answering unchanged.
     const response = await fetchImpl(url, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(8000),
-      headers: { authorization: `Bearer ${runtimeAttentionToken(row, operation, secret)}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ operation, eventId: row.id, orgId: row.org_id, userId: row.user_id }) });
+      headers: { authorization: `Bearer ${runtimeAttentionToken(row, operation, secret, Date.now(), destination)}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ operation, eventId: row.id, orgId: row.org_id, userId: row.user_id, ...(destination === 'employees' ? { destination } : {}) }) });
     const text = await response.text();
     if (text.length > 32000) throw Error('runtime_attention_response_too_large');
     if (!response.ok) throw Error('runtime_attention_unavailable');
@@ -54,6 +67,19 @@ export function createRuntimeAttentionBridge({ env = process.env, fetchImpl = fe
     async readConsent(row) { const result = await call('context', row); contexts.set(row.id, result); return result.consent; },
     async readSnapshot(row) { const result = contexts.get(row.id); contexts.delete(row.id); return result?.snapshot; },
     async assess(row) { return call('assess', row); },
+    /**
+     * Runtime's attention verdict for the company's AI employees (Runtime switched off). Never delivers or wakes Runtime.
+     * @param {object} row Event row.
+     * @returns {Promise<object>} The verdict: destination `employees`, action retain|notify|wake, assessment answers and `toolSlugs`.
+     * @throws {Error} `runtime_attention_unavailable` or `runtime_attention_invalid_employee_verdict`; the caller falls back.
+     */
+    async assessForEmployees(row) {
+      const verdict = await call('assess', row, 'employees');
+      if (!verdict || verdict.destination !== 'employees' || !EMPLOYEE_ACTIONS.has(verdict.action) || verdict.targetSessionId !== undefined
+        || (verdict.toolSlugs !== undefined && (!Array.isArray(verdict.toolSlugs) || verdict.toolSlugs.length > 8
+          || verdict.toolSlugs.some(slug => typeof slug !== 'string' || !/^[A-Z0-9]+(?:_[A-Z0-9]+)+$/u.test(slug))))) throw Error('runtime_attention_invalid_employee_verdict');
+      return verdict;
+    },
     async deliver(row) { const result = await call('deliver', row); if (result.status !== 'accepted' || result.eventId !== row.id
       || result.targetSessionId !== row.relevance_decision?.runtimeAttention?.targetSessionId) throw Error('runtime_attention_delivery_unconfirmed'); return result; },
   };

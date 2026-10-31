@@ -59,6 +59,73 @@ const int = (value, fallback, min, max) => { const n = Number(value); return Num
 const ratio = (value, fallback, min, max) => { const n = Number(value); return value !== undefined && value !== '' && Number.isFinite(n) && n >= min && n <= max ? n : fallback; };
 
 /**
+ * A comma-separated list of organization UUIDs that must be valid when set: a malformed entry throws instead of being dropped.
+ * @param {string|undefined} raw Environment value.
+ * @param {string} name Variable name, for the error.
+ * @returns {Set<string>} Lower-case UUIDs.
+ */
+export function strictOrgList(raw, name) {
+  const items = String(raw ?? '').split(',').map(item => item.trim().toLowerCase()).filter(Boolean);
+  const invalid = items.find(item => !UUID.test(item));
+  if (invalid !== undefined) throw new Error(`${name} must list organization UUIDs; "${invalid.slice(0, 60)}" is not one`);
+  return new Set(items);
+}
+/**
+ * A whole number of milliseconds that must be in range when set; unset gives the default.
+ * @returns {number} The value.
+ */
+function strictMs(raw, name, fallback, min, max) {
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) throw new Error(`${name} must be a whole number of milliseconds from ${min} to ${max}`);
+  return n;
+}
+/**
+ * How Runtime's attention layer judges events for the AI employees of a Runtime-off company. `shadow` organizations get the verdict
+ * computed and stored next to the company relevance verdict, which still decides delivery; `active` organizations are delivered on it.
+ * @param {Record<string,string|undefined>} env Process environment.
+ * @returns {{shadowOrgs:Set<string>,activeOrgs:Set<string>}} The two lists.
+ * @throws {Error} When an entry is not a UUID or an organization is in both lists.
+ */
+export function attentionEmployeeModes(env = process.env) {
+  const shadowOrgs = strictOrgList(env.HIVEMIND_ATTENTION_EMPLOYEE_ORGS_SHADOW, 'HIVEMIND_ATTENTION_EMPLOYEE_ORGS_SHADOW');
+  const activeOrgs = strictOrgList(env.HIVEMIND_ATTENTION_EMPLOYEE_ORGS_ACTIVE, 'HIVEMIND_ATTENTION_EMPLOYEE_ORGS_ACTIVE');
+  const both = [...shadowOrgs].find(org => activeOrgs.has(org));
+  if (both) throw new Error(`organization ${both} is in both HIVEMIND_ATTENTION_EMPLOYEE_ORGS_SHADOW and HIVEMIND_ATTENTION_EMPLOYEE_ORGS_ACTIVE`);
+  return { shadowOrgs, activeOrgs };
+}
+/**
+ * Which attention judges a Runtime-off company's event for its employees.
+ * @param {{attentionShadowOrgs?:Set<string>,attentionActiveOrgs?:Set<string>}} config Routing config.
+ * @param {string} orgId Organization.
+ * @returns {'active'|'shadow'|'off'} The mode.
+ */
+export function attentionEmployeeMode(config, orgId) {
+  const org = String(orgId).toLowerCase();
+  return config.attentionActiveOrgs?.has(org) ? 'active' : config.attentionShadowOrgs?.has(org) ? 'shadow' : 'off';
+}
+/**
+ * When an event happened: the earlier of the provider's occurrence and Core's receipt.
+ * @param {{occurred_at?:string|Date|null,received_at?:string|Date|null}} row Event row.
+ * @returns {number} Milliseconds since the epoch, or NaN when neither is readable.
+ */
+export function eventHappenedAt(row) {
+  const times = [row?.occurred_at, row?.received_at].map(value => (value ? new Date(value).getTime() : NaN)).filter(Number.isFinite);
+  return times.length ? Math.min(...times) : NaN;
+}
+/**
+ * Whether an event is too old to wake anyone: only live events wake employees or Runtime.
+ * @param {object} row Event row with occurred_at / received_at.
+ * @param {{maxEventAgeMs:number}} config Routing config.
+ * @param {number} [now] Clock.
+ * @returns {boolean} True when it happened longer ago than the limit; an event with no readable time is not judged too old.
+ */
+export function eventTooOld(row, config, now = Date.now()) {
+  const at = eventHappenedAt(row);
+  return Number.isFinite(at) && now - at > config.maxEventAgeMs;
+}
+
+/**
  * Routing limits, all changeable from the environment.
  * @param {Record<string,string|undefined>} env Process environment.
  * @returns {Readonly<object>} Limits and the feature switch.
@@ -86,6 +153,13 @@ export function routingConfig(env = process.env) {
     // Companies that see every connected-app event while Runtime is off: the relevance check is recorded but rejects nothing.
     // A company that later asks for important or company-related events only is removed from this list.
     deliverAllOrgs: new Set(String(env.HIVEMIND_EMPLOYEE_EVENT_DELIVER_ALL_ORGS ?? '').split(',').map(item => item.trim().toLowerCase()).filter(item => UUID.test(item))),
+    // Runtime's attention judges a Runtime-off company's events for its employees: in shadow next to the company relevance verdict, active instead of it.
+    ...(() => { const modes = attentionEmployeeModes(env); return { attentionShadowOrgs: modes.shadowOrgs, attentionActiveOrgs: modes.activeOrgs }; })(),
+    // Only live events wake employees or Runtime: one that happened longer ago than this is recorded as too old (Runtime path and forwarding).
+    maxEventAgeMs: strictMs(env.HIVEMIND_ATTENTION_MAX_EVENT_AGE_MS, 'HIVEMIND_ATTENTION_MAX_EVENT_AGE_MS', 600_000, 60_000, 86_400_000),
+    // Forwarded approved events of one source (toolkit, trigger and repository or sender) arriving within this window go to OpenDot as one
+    // request carrying the burst. 0 forwards each event alone; set it only once OpenDot accepts the `burst` field.
+    forwardCoalesceMs: strictMs(env.HIVEMIND_EMPLOYEE_EVENT_FORWARD_COALESCE_MS, 'HIVEMIND_EMPLOYEE_EVENT_FORWARD_COALESCE_MS', 0, 0, 900_000),
   });
 }
 
@@ -639,7 +713,7 @@ export async function forwardApprovedEvent(db, { orgId, userId, event, sub }, de
     VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,'forward_pending',$9) ON CONFLICT(event_id,employee_id) DO UPDATE SET reason=EXCLUDED.reason
     WHERE hivemind_employee_event_deliveries.status='forward_pending' AND EXCLUDED.reason='forward_approved' RETURNING id`,
   randomUUID(), orgId, userId, FORWARDED, event.id, sub.toolkit, sub.slug, `forward_${relevance}`, clip(facts.title || facts.body, 140));
-  (deps.schedule ?? (() => scheduleFlush(db, `${orgId}:${FORWARDED}`, 500, deps)))({ employeeId: FORWARDED });
+  (deps.schedule ?? (() => scheduleFlush(db, `${orgId}:${FORWARDED}`, (deps.config.forwardCoalesceMs ?? 0) + 500, deps)))({ employeeId: FORWARDED });
   return { forwarded: true, relevance };
 }
 
@@ -690,44 +764,82 @@ export async function forwardRequest(db, row, config) {
 }
 
 /**
- * Sends every due forwarded row to OpenDot, one request per event, with the same retry as wakes: temporary failures back off
- * (1, 2, 4 ... up to 15 minutes) until maxAttempts, a permanent refusal is final. On success the row is `forwarded`, its skip
- * reason holds OpenDot's outcome, and watches OpenDot woke get their last fired time.
+ * The source of a forwarded request that bursts coalesce on: organization, account, toolkit, trigger and repository or sender.
+ * A mention or a request that was not approved never coalesces; it gets its own key.
+ * @param {object} request A {@link forwardRequest} result.
+ * @param {string} rowId Delivery row id, the key of a request that does not coalesce.
+ * @returns {string} The key.
+ */
+export function forwardBurstKey(request, rowId) {
+  if (request.relevance !== 'approved' || String(request.event.mentionText).includes('@')) return `row:${rowId}`;
+  return JSON.stringify([request.organizationId, request.userId, request.event.toolkit, request.event.triggerSlug, request.event.repository || request.sender.keys[0] || '']);
+}
+
+/**
+ * Sends every due forwarded row to OpenDot with the same retry as wakes: temporary failures back off (1, 2, 4 ... up to 15 minutes)
+ * until maxAttempts, a permanent refusal is final. Only live events are sent: a row whose event happened longer ago than maxEventAgeMs
+ * is skipped as `too_old`. With forwardCoalesceMs above 0, each row waits that long and the claimed rows of one source
+ * ({@link forwardBurstKey}) go as one request for the oldest, carrying `event.burst` (count, event ids, titles); the others are
+ * `forwarded` with reason `coalesced`. On success the row is `forwarded`, its skip reason holds OpenDot's outcome, and watches
+ * OpenDot woke get their last fired time.
  * @param {object} db Prisma client.
  * @param {Date} now Clock.
  * @param {object} config Routing limits.
- * @param {object} deps `forward` for tests.
- * @returns {Promise<{forwarded:number,forwardFailed:number}>} Counts for this sweep.
+ * @param {object} deps `forward` and `schedule` for tests.
+ * @returns {Promise<{forwarded:number,forwardFailed:number,tooOld:number,coalesced:number}>} Counts for this sweep.
  */
 export async function flushForwardedEvents(db, now, config, deps = {}) {
-  const out = { forwarded: 0, forwardFailed: 0 };
+  const out = { forwarded: 0, forwardFailed: 0, tooOld: 0, coalesced: 0 };
+  const window = config.forwardCoalesceMs ?? 0;
   const rows = await db.$queryRawUnsafe(`UPDATE hivemind_employee_event_deliveries SET status='forwarding',claimed_at=now(),attempts=attempts+1
     WHERE id IN (SELECT id FROM hivemind_employee_event_deliveries WHERE employee_id=$1
-      AND ((status='forward_pending' AND (retry_at IS NULL OR retry_at <= $2::timestamptz)) OR (status='forwarding' AND claimed_at < $3::timestamptz))
-      ORDER BY created_at LIMIT 32 FOR UPDATE SKIP LOCKED) RETURNING *`,
-  FORWARDED, now.toISOString(), new Date(now.getTime() - 5 * 60_000).toISOString());
-  const finish = (row, status, reason, error) => db.$executeRawUnsafe(
+      AND ((status='forward_pending' AND (retry_at IS NULL OR retry_at <= $2::timestamptz) AND created_at <= $4::timestamptz) OR (status='forwarding' AND claimed_at < $3::timestamptz))
+      ORDER BY created_at LIMIT ${window > 0 ? 200 : 32} FOR UPDATE SKIP LOCKED) RETURNING *`,
+  FORWARDED, now.toISOString(), new Date(now.getTime() - 5 * 60_000).toISOString(), window > 0 ? new Date(now.getTime() - window).toISOString() : 'infinity');
+  const finish = (ids, status, reason, error) => db.$executeRawUnsafe(
     `UPDATE hivemind_employee_event_deliveries SET status=$2,skip_reason=$3,last_error=$4,delivered_at=CASE WHEN $2='forwarded' THEN now() ELSE delivered_at END WHERE id = ANY($1::uuid[])`,
-    [row.id], status, reason ?? null, error ?? null);
+    ids, status, reason ?? null, error ?? null);
+  const groups = new Map();
   for (const row of rows) {
+    let request;
+    try { request = await forwardRequest(db, row, config); }
+    catch { await db.$executeRawUnsafe("UPDATE hivemind_employee_event_deliveries SET status='forward_pending',last_error='forward_request_unavailable',retry_at=$2::timestamptz WHERE id = ANY($1::uuid[])", [row.id], new Date(now.getTime() + 60_000).toISOString()); continue; }
+    if (!request) { await finish([row.id], 'skipped', 'event_unavailable'); continue; }
+    // Only live events are forwarded; a retry or a late delivery of an old event never wakes anyone.
+    if (eventTooOld({ occurred_at: request.event.occurredAt, received_at: request.receivedAt }, config, now.getTime())) { await finish([row.id], 'skipped', 'too_old'); out.tooOld += 1; continue; }
+    const key = window > 0 ? forwardBurstKey(request, row.id) : `row:${row.id}`;
+    const group = groups.get(key) ?? { rows: [], requests: [] };
+    group.rows.push(row); group.requests.push(request); groups.set(key, group);
+  }
+  for (const { rows: members, requests } of groups.values()) {
+    const leader = requests[0];
+    const request = members.length > 1 ? { ...leader, event: { ...leader.event, burst: { count: members.length,
+      eventIds: requests.slice(0, 25).map(item => item.eventId), titles: requests.slice(0, 10).map(item => clip(item.event.title, 200)) } } } : leader;
+    const ids = members.map(row => row.id);
     try {
-      const request = await forwardRequest(db, row, config);
-      if (!request) { await finish(row, 'skipped', 'event_unavailable'); continue; }
       const receipt = await (deps.forward ?? dispatchOpenDotRoutedEvent)(request);
-      await finish(row, 'forwarded', clip(receipt?.outcome, 40) || null);
+      await finish([members[0].id], 'forwarded', clip(receipt?.outcome, 40) || null);
+      if (members.length > 1) { await finish(ids.slice(1), 'forwarded', 'coalesced'); out.coalesced += members.length - 1; }
       const fired = (Array.isArray(receipt?.targets) ? receipt.targets : []).filter(target => target?.wake === 'admitted')
         .flatMap(target => (Array.isArray(target.watchIds) ? target.watchIds : [])).filter(id => UUID.test(String(id)));
-      if (fired.length) await db.$executeRawUnsafe('UPDATE hivemind_employee_watches SET last_fired_at=now(),last_error=NULL,updated_at=now() WHERE id = ANY($1::uuid[]) AND org_id=$2', [...new Set(fired)], row.org_id);
+      if (fired.length) await db.$executeRawUnsafe('UPDATE hivemind_employee_watches SET last_fired_at=now(),last_error=NULL,updated_at=now() WHERE id = ANY($1::uuid[]) AND org_id=$2', [...new Set(fired)], members[0].org_id);
       out.forwarded += 1;
     } catch (error) {
       const code = clip(error?.message, 120) || 'forward_failed';
-      if (permanent(error)) await finish(row, 'skipped', code, code);
-      else if (row.attempts >= config.maxAttempts) { await finish(row, 'failed', 'forward_failed', code); out.forwardFailed += 1; }
+      const attempts = Math.max(...members.map(row => row.attempts));
+      if (permanent(error)) await finish(ids, 'skipped', code, code);
+      else if (attempts >= config.maxAttempts) { await finish(ids, 'failed', 'forward_failed', code); out.forwardFailed += members.length; }
       else {
-        const retryAt = new Date(now.getTime() + Math.min(60_000 * 2 ** (row.attempts - 1), 900_000)).toISOString();
-        await db.$executeRawUnsafe("UPDATE hivemind_employee_event_deliveries SET status='forward_pending',last_error=$2,retry_at=$3::timestamptz WHERE id = ANY($1::uuid[])", [row.id], code, retryAt);
+        const retryAt = new Date(now.getTime() + Math.min(60_000 * 2 ** (attempts - 1), 900_000)).toISOString();
+        await db.$executeRawUnsafe("UPDATE hivemind_employee_event_deliveries SET status='forward_pending',last_error=$2,retry_at=$3::timestamptz WHERE id = ANY($1::uuid[])", ids, code, retryAt);
       }
     }
+  }
+  if (window > 0) {
+    // Rows still inside their window are sent by a flush timed for the oldest of them.
+    const [next] = await db.$queryRawUnsafe("SELECT min(created_at) AS at FROM hivemind_employee_event_deliveries WHERE employee_id=$1 AND status='forward_pending'", FORWARDED);
+    const at = next?.at ? new Date(next.at).getTime() : NaN;
+    if (Number.isFinite(at)) (deps.schedule ?? (delay => scheduleFlush(db, `forward:${FORWARDED}`, delay, deps)))(Math.max(500, at + window - now.getTime() + 500));
   }
   return out;
 }

@@ -12,5 +12,6 @@ test('the deliver-all list is read per company and ignores anything that is not 
 
 test('only a Runtime-off company on the list has a rejection turned into a delivery', () => {
   const source = fs.readFileSync(new URL('../../src/connectors/composio/activity-relevance.js', import.meta.url), 'utf8');
-  assert.match(source, /if \(!runtimeOn && receipt\.status === 'rejected' && routing\.deliverAllOrgs\?\.has\(String\(ctx\.orgId\)\.toLowerCase\(\)\)\) \{\n\s*receipt = \{ \.\.\.receipt, status: 'approved', deliveredAll: true, classifierStatus: 'rejected' \};/);
+  assert.match(source, /const deliverAll = !runtimeOn && routing\.deliverAllOrgs\?\.has\(String\(ctx\.orgId\)\.toLowerCase\(\)\) === true;/);
+  assert.match(source, /if \(deliverAll && receipt\.status === 'rejected'\) \{\n\s*receipt = \{ \.\.\.receipt, status: 'approved', deliveredAll: true, classifierStatus: 'rejected' \};/);
 });

@@ -2,7 +2,7 @@ import test from 'node:test';import assert from 'node:assert/strict';
 import {classifyPendingActivity,recoverPendingActivity} from '../../src/connectors/composio/activity-relevance.js';
 let sequence=0;
 async function run(action='notify',{failed=false,prior,data={text:'ordinary user activity'}}={}){
- const writes=[],calls=[],notifications=[],orgId=`org-${++sequence}`,row={id:'event',subscription_id:'sub',org_id:orgId,user_id:'user',received_at:'2026-10-04T12:00:00Z',data,relevance_decision:prior};
+ const writes=[],calls=[],notifications=[],orgId=`org-${++sequence}`,row={id:'event',subscription_id:'sub',org_id:orgId,user_id:'user',received_at:new Date(Date.now()-60_000).toISOString(),data,relevance_decision:prior};
  const db={userOrganization:{findUnique:async()=>({isActive:true,role:'admin'})},workspaceNotification:{upsert:async args=>{notifications.push(args);return {id:'notice'}}},$queryRawUnsafe:async sql=>sql.includes('UPDATE hivemind_trigger_events')?[row]:[{toolkit:'slack',runtime_attention:true,runtime_attention_enabled_at:'2026-10-04T11:00:00Z'}],$executeRawUnsafe:async(sql,...args)=>writes.push({sql,args})};
  await classifyPendingActivity({orgId,userId:'user',allowedAccountIds:['account'],prisma:db,runtimeAttention:{assess:async event=>{calls.push(['assess',event.id]);return {policy:'runtime_attention_v3',action,targetSessionId:'runtime',contextRevision:'current'}},deliver:async()=>{calls.push(['deliver']);if(failed)throw Error('unknown');return {status:'accepted',targetSessionId:'runtime',inboxPersisted:true}}}});
  return {writes,calls,notifications};
@@ -15,7 +15,7 @@ test('retry reuses recorded native admission without reclassifying',async()=>{co
 
 test('overlapping intake keeps new accounts and drains after the current batch',async()=>{
  const batches=[],orgId='overlap-'+(++sequence);let release,started;const gate=new Promise(r=>release=r),ready=new Promise(r=>started=r);let n=0;
- const db={userOrganization:{findUnique:async()=>({isActive:true,role:'admin'})},$queryRawUnsafe:async(sql,...args)=>{if(sql.includes('UPDATE hivemind_trigger_events')){batches.push(args[2]);if(n++===0){started();await gate;return [{id:'first',subscription_id:'sub',received_at:'2026-10-04T12:00:00Z'}]}return []}return [{toolkit:'slack',runtime_attention:true,runtime_attention_enabled_at:'2026-10-04T11:00:00Z'}]},$executeRawUnsafe:async()=>{}};
+ const db={userOrganization:{findUnique:async()=>({isActive:true,role:'admin'})},$queryRawUnsafe:async(sql,...args)=>{if(sql.includes('UPDATE hivemind_trigger_events')){batches.push(args[2]);if(n++===0){started();await gate;return [{id:'first',subscription_id:'sub',received_at:new Date(Date.now()-60_000).toISOString()}]}return []}return [{toolkit:'slack',runtime_attention:true,runtime_attention_enabled_at:'2026-10-04T11:00:00Z'}]},$executeRawUnsafe:async()=>{}};
  const ctx={orgId,userId:'user',prisma:db,runtimeAttention:{assess:async()=>({action:'retain'})}};
  const first=classifyPendingActivity({...ctx,allowedAccountIds:['one']});
  await ready;
@@ -30,7 +30,7 @@ test('restart recovery selects due durable scopes without a page visit',async()=
  assert.deepEqual(calls[0].allowedAccountIds,['native:slack:one','gmail']);
 });
 test('a unavailable native context remains durable and pending',async()=>{
- const writes=[],orgId='pending-'+(++sequence),row={id:'event',subscription_id:'sub',received_at:'2026-10-04T12:00:00Z'};
+ const writes=[],orgId='pending-'+(++sequence),row={id:'event',subscription_id:'sub',received_at:new Date(Date.now()-60_000).toISOString()};
  const db={userOrganization:{findUnique:async()=>({isActive:true,role:'admin'})},$queryRawUnsafe:async sql=>sql.includes('UPDATE hivemind_trigger_events')?[row]:[{runtime_attention:true,runtime_attention_enabled_at:'2026-10-04T11:00:00Z'}],$executeRawUnsafe:async(sql,...args)=>writes.push({sql,args})};
  await classifyPendingActivity({orgId,userId:'admin',prisma:db,allowedAccountIds:['account'],runtimeAttention:{assess:async()=>({action:'retain',reason:'context_unavailable'}),deliver:async()=>{throw Error('must not deliver')}}});
  assert.equal(writes[0].args[0],'pending');assert.equal(JSON.parse(writes[0].args[1]).runtimeAttention.reason,'context_unavailable');

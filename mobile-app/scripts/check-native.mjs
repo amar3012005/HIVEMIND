@@ -44,6 +44,13 @@ assert.match(plist, /WKAppBoundDomains/);
 assert.match(iosBridge, /allowedHosts: \[self.roomHost, "dots.singulancelabs.com"\]/);
 assert.match(iosBridge, /\^\/employees\/\[0-9a-fA-F\]\{8\}/);
 assert.doesNotMatch(iosBridge, /call\.resolve\(\[[^\]]*cookie/i);
+// Haptics: whitelisted kinds from the app and from room pages (same main-frame and host checks), Settings deep link.
+assert.match(iosBridge, /@objc func haptic\(/);
+assert.match(iosBridge, /@objc func openSettings\(/);
+assert.match(iosBridge, /"haptic", "openSettings"\]/);
+assert.match(iosBridge, /UIApplication\.openSettingsURLString/);
+assert.match(iosBridge, /type == "hivemind\.open-dot\.haptic"/);
+assert.match(iosBridge, /HapticPlayer\.kinds\.contains/);
 
 if (process.argv.includes('--release') || process.argv.includes('--packaged')) {
   assert.ok(!process.env.SINGULANCE_MOBILE_REMOTE_URL, 'Remote server.url must not be used for a store build.');

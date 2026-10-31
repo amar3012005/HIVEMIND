@@ -30,6 +30,10 @@ export interface SingulanceNative {
   setPreference(options: {key: 'privacyChoice'; value: string}): Promise<void>;
   removePreference(options: {key: 'privacyChoice'}): Promise<void>;
   closeRoom(): Promise<void>;
+  /** Plays system haptic feedback; rejects for any other kind. Android maps kinds to the closest predefined effect and honours the system touch-feedback setting. */
+  haptic(options: {kind: 'light' | 'soft' | 'warning' | 'success' | 'selection' | 'error'}): Promise<void>;
+  /** Opens this app's page in the system Settings. */
+  openSettings(): Promise<void>;
   addListener(event: 'roomClosed', listener: () => void): Promise<{remove():Promise<void>}>;
   /** User-initiated OS document picker. No filesystem path/URI accepted. Max 20 MiB. */
   saveFile(options: {name: string; mimeType: string; dataBase64: string}): Promise<{saved:boolean}>;

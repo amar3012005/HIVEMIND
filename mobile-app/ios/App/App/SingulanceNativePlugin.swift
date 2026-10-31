@@ -10,7 +10,7 @@ import CryptoKit
 public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTaskDelegate, UIDocumentPickerDelegate, ASWebAuthenticationPresentationContextProviding {
     public let identifier = "SingulanceNativePlugin"
     public let jsName = "SingulanceNative"
-    public let pluginMethods: [CAPPluginMethod] = ["authenticate", "setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance", "workspaceAccess", "openRoom", "closeRoom", "prewarmRoom", "getPreference", "setPreference", "removePreference"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
+    public let pluginMethods: [CAPPluginMethod] = ["authenticate", "setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance", "workspaceAccess", "openRoom", "closeRoom", "prewarmRoom", "getPreference", "setPreference", "removePreference", "haptic", "openSettings"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
     private var authenticationSession: ASWebAuthenticationSession?
     public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         return bridge!.viewController!.view.window!
@@ -60,6 +60,20 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
         return key
     }
     private func query(_ key: String) -> [String: Any] { [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: key] }
+    @objc func haptic(_ call: CAPPluginCall) {
+        guard let kind = call.getString("kind"), HapticPlayer.kinds.contains(kind) else { call.reject("Haptic is not allowed."); return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.trusted() else { call.reject("Haptic is not allowed."); return }
+            HapticPlayer.shared.play(kind)
+            call.resolve()
+        }
+    }
+    @objc func openSettings(_ call: CAPPluginCall) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.trusted(), let url = URL(string: UIApplication.openSettingsURLString) else { call.reject("Settings could not open."); return }
+            UIApplication.shared.open(url) { _ in call.resolve() }
+        }
+    }
     @objc func getAppearance(_ call: CAPPluginCall) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.trusted() else {
@@ -486,6 +500,27 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
     enum NativeError: Error { case denied }
 }
 
+/// Prepared feedback generators reused across calls; `kinds` is the whitelist shared with room messages.
+private final class HapticPlayer {
+    static let shared = HapticPlayer()
+    static let kinds: Set<String> = ["light", "soft", "warning", "success", "selection", "error"]
+    private let light = UIImpactFeedbackGenerator(style: .light)
+    private let soft = UIImpactFeedbackGenerator(style: .soft)
+    private let notification = UINotificationFeedbackGenerator()
+    private let selection = UISelectionFeedbackGenerator()
+    func play(_ kind: String) {
+        switch kind {
+        case "light": light.impactOccurred(); light.prepare()
+        case "soft": soft.impactOccurred(); soft.prepare()
+        case "warning": notification.notificationOccurred(.warning); notification.prepare()
+        case "success": notification.notificationOccurred(.success); notification.prepare()
+        case "error": notification.notificationOccurred(.error); notification.prepare()
+        case "selection": selection.selectionChanged(); selection.prepare()
+        default: break
+        }
+    }
+}
+
 private class TrustedFrameHandler: NSObject, WKScriptMessageHandler {
     private let delegate: WKScriptMessageHandler
     init(_ delegate: WKScriptMessageHandler) { self.delegate = delegate }
@@ -590,7 +625,12 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
         NSLog("[room-message] main=%d host=%@ body=%@", message.frameInfo.isMainFrame ? 1 : 0, message.frameInfo.request.url?.host ?? "-", String(describing: message.body))
         #endif
         guard message.frameInfo.isMainFrame, let host = message.frameInfo.request.url?.host, allowedHosts.contains(host),
-              let body = message.body as? [String: Any], body["version"] as? Int == 1, body["type"] as? String == "hivemind.open-dot.back" else { return }
+              let body = message.body as? [String: Any], body["version"] as? Int == 1, let type = body["type"] as? String else { return }
+        if type == "hivemind.open-dot.haptic" {
+            if let kind = body["kind"] as? String, HapticPlayer.kinds.contains(kind) { HapticPlayer.shared.play(kind) }
+            return
+        }
+        guard type == "hivemind.open-dot.back" else { return }
         finish()
     }
     /// Rooms of one company and person share one store, so closing a room keeps the session cookie for the next room;

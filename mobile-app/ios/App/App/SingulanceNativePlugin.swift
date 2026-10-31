@@ -137,7 +137,7 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
                 for cookie in runtimeCookies?.cookies ?? [] { runtimeCookies?.deleteCookie(cookie) }
                 UserDefaults.standard.removeObject(forKey: Self.lastRoomPathKey); UserDefaults.standard.removeObject(forKey: Self.lastRoomScopeKey)
                 DispatchQueue.main.async {
-                    self.room?.closeSilently(); self.room = nil
+                    self.room?.closeSilently(forgetSession: true); self.room = nil
                     self.discardWarmRoom()
                     RoomViewController.removeStores(keeping: nil)
                     RoomViewController.removeSiteData(hosts: self.roomDataHosts)
@@ -306,12 +306,14 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
     public override func load() {
         // The warm room holds the Control session cookie in its store: release it when the app leaves the foreground and rebuild it on return.
         let center = NotificationCenter.default
-        lifecycleObservers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in self?.discardWarmRoom() })
+        lifecycleObservers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in self?.discardWarmRoom(forgetSession: true) })
         lifecycleObservers.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in self?.prewarmLastRoom() })
         DispatchQueue.main.async { self.prewarmLastRoom() }
     }
-    private func discardWarmRoom() {
-        warmRoom?.closeSilently(); warmRoom = nil; warmPath = nil; warmScope = nil
+    /// Drops the warm room. `forgetSession` also removes the session cookie from the shared room store (backgrounding,
+    /// sign-out); replacing the warm room with another one of the same store must keep it, or the new room loses it.
+    private func discardWarmRoom(forgetSession: Bool = false) {
+        warmRoom?.closeSilently(forgetSession: forgetSession); warmRoom = nil; warmPath = nil; warmScope = nil
     }
     private func prewarmLastRoom() {
         let defaults = UserDefaults.standard
@@ -582,8 +584,10 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
               let body = message.body as? [String: Any], body["version"] as? Int == 1, body["type"] as? String == "hivemind.open-dot.back" else { return }
         finish()
     }
-    func closeSilently() { silent = true; loadedURL = nil; webView.stopLoading(); forgetSession(); if presentingViewController != nil { dismiss(animated: true) } }
-    @objc private func finish() { webView.stopLoading(); forgetSession(); dismiss(animated: true) { self.onClose() } }
+    /// Rooms of one company and person share one store, so closing a room keeps the session cookie for the next room;
+    /// it is removed only when asked (backgrounding with a warm room, sign-out).
+    func closeSilently(forgetSession forget: Bool = false) { silent = true; loadedURL = nil; webView.stopLoading(); if forget { forgetSession() }; if presentingViewController != nil { dismiss(animated: true) } }
+    @objc private func finish() { webView.stopLoading(); dismiss(animated: true) { self.onClose() } }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
         let allowed = url.scheme == "about" || (url.scheme == "https" && url.port == nil && allowedHosts.contains(url.host ?? ""))

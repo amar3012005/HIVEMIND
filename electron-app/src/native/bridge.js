@@ -12,10 +12,11 @@ const CHANNELS = Object.freeze([
   'native:request', 'native:workspace-access',
   'native:room:open', 'native:room:close', 'native:room:prewarm',
   'native:notify', 'native:unread',
+  'native:notify-prefs', 'native:tray-status', 'native:login-item:get', 'native:login-item:set',
 ]);
 
 function createBridge(deps) {
-  const { tokenStore, fetchCore, fetchRunner, rooms, notifier, setUnread, prefsFile, fs = nodeFs, onSignOut = () => {}, lastRoom, now = Date.now } = deps;
+  const { tokenStore, fetchCore, fetchRunner, rooms, notifier, setUnread, prefsFile, setTrayStatus = () => {}, loginItem, fs = nodeFs, onSignOut = () => {}, lastRoom, now = Date.now } = deps;
   const COOKIE_TTL_MS = 10 * 60 * 1000;
   let cookieCache = null; // { token, cookie, until }
   const controllers = new Set();
@@ -159,6 +160,10 @@ function createBridge(deps) {
       rooms.close({ silent: true });
     },
     'native:notify': (n = {}) => notifier.show(n),
+    'native:notify-prefs': (p = {}) => { notifier.setPrefs(p); },
+    'native:tray-status': (s = {}) => { setTrayStatus(s); },
+    'native:login-item:get': () => loginItem.get(),
+    'native:login-item:set': ({ enabled } = {}) => loginItem.set(enabled),
     'native:unread': ({ count } = {}) => { setUnread(Number.isInteger(count) && count >= 0 ? Math.min(count, 999) : 0); },
   };
   return { handlers, prewarmLastRoom, cachedControlCookie, abortAll: () => { for (const c of controllers) c.abort(); controllers.clear(); } };

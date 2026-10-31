@@ -27,6 +27,8 @@ test('every channel the preload invokes is registered in the main bridge', async
   await api.prefs.get('k'); await api.prefs.set('k', 'v');
   await api.request({}); await api.workspaceAccess(); await api.openRoom({}); await api.prewarmRoom({}); await api.closeRoom({});
   await api.notify({}); await api.setUnread(1);
+  await api.setNotificationPrefs({}); await api.setTrayStatus({}); await api.getLoginItem(); await api.setLoginItem(true);
+  assert.equal(api.haptic('success'), undefined);
   for (const [c] of invoked) assert.ok(CHANNELS.includes(c), c);
   assert.equal(new Set(invoked.map(([c]) => c)).size, CHANNELS.length, 'every registered channel is reachable');
 });
@@ -36,7 +38,7 @@ test('preload exposes no raw ipcRenderer, require or process', () => {
   const api = exposed.singulanceDesktop;
   assert.ok(Object.isFrozen(api));
   for (const k of ['ipcRenderer', 'require', 'process', 'send', 'invoke']) assert.ok(!(k in api));
-  assert.deepEqual(Object.keys(api).sort(), ['closeRoom', 'notify', 'onForeground', 'onNotificationClick', 'onRoomClosed', 'openRoom', 'platform', 'prefs', 'prewarmRoom', 'request', 'setUnread', 'tokenStore', 'version', 'workspaceAccess']);
+  assert.deepEqual(Object.keys(api).sort(), ['closeRoom', 'getLoginItem', 'haptic', 'notify', 'onForeground', 'onNotificationAction', 'onNotificationClick', 'onRoomClosed', 'openRoom', 'platform', 'prefs', 'prewarmRoom', 'request', 'setLoginItem', 'setNotificationPrefs', 'setTrayStatus', 'setUnread', 'tokenStore', 'version', 'workspaceAccess']);
 });
 
 test('tokenStore only accepts credential keys through the bridge', async () => {

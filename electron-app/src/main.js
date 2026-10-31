@@ -11,6 +11,8 @@ const { createRoomManager, createLastRoomStore, PARTITION: ROOM_PARTITION } = re
 const { createUpdateStatus } = require('./native/update-status');
 const { createScreens } = require('./native/screens');
 const { createNotifier } = require('./native/notifier');
+const { normalizeStatus, buildTrayTemplate } = require('./native/tray-menu');
+const { createLoginItem } = require('./native/login-item');
 const { parseDeepLink, isTrustedSender } = require('./native/policy');
 
 // Side-by-side runs (tests, a dev build next to the installed app) need their own single-instance lock.
@@ -297,40 +299,31 @@ function createWindow() {
 }
 
 // ── Tray icon ─────────────────────────────────────────────────
+let trayStatus = normalizeStatus();
+const loginItem = createLoginItem({ app });
+function showMainWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show(); mainWindow.focus();
+  } else createWindow();
+}
+function rebuildTrayMenu() {
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate(buildTrayTemplate(trayStatus, {
+    openAtLogin: loginItem.get().enabled,
+    onOpen: showMainWindow,
+    onToggleLogin: (item) => { loginItem.set(!!item.checked); rebuildTrayMenu(); },
+    onCheckUpdates: () => checkForUpdates(true),
+    onQuit: () => { isQuitting = true; app.quit(); },
+  })));
+}
 function createTray() {
   const trayIconPath = path.join(__dirname, '..', 'assets', 'tray-icon.png');
   const icon = nativeImage.createFromPath(trayIconPath).resize({ width: 16, height: 16 });
   tray = new Tray(icon);
   tray.setToolTip('SINGULANCE');
 
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: 'Open SINGULANCE',
-      click: () => {
-        if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
-        } else {
-          createWindow();
-        }
-      },
-    },
-    { type: 'separator' },
-    {
-      label: 'Check for Updates',
-      click: () => checkForUpdates(true),
-    },
-    { type: 'separator' },
-    {
-      label: 'Quit SINGULANCE',
-      click: () => {
-        isQuitting = true;
-        app.quit();
-      },
-    },
-  ]);
-
-  tray.setContextMenu(contextMenu);
+  rebuildTrayMenu();
   tray.on('click', () => {
     if (mainWindow) {
       mainWindow.isVisible() ? mainWindow.focus() : mainWindow.show();
@@ -488,6 +481,11 @@ const rooms = createRoomManager({
 const screens = createScreens({ electron, userDataDir: app.getPath('userData'), log: (...a) => log.info('[screens]', ...a) });
 const notifier = createNotifier({
   Notification,
+  onDeepLink: (link, id) => {
+    if (link) handleDeepLink(link); else showMainWindow();
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('native:notification-click', { path: null, id });
+  },
+  onAction: (a) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('native:notification-action', a); },
   onClick: (target, id) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
@@ -503,9 +501,12 @@ const bridge = createBridge({
   rooms,
   lastRoom: roomsLast,
   notifier,
+  loginItem,
+  setTrayStatus: (status) => { trayStatus = normalizeStatus(status); rebuildTrayMenu(); },
   prefsFile: path.join(app.getPath('userData'), 'prefs.json'),
   setUnread: (count) => {
     app.setBadgeCount(count);
+    if (app.dock && process.platform === 'darwin') app.dock.setBadge(count ? String(count) : '');
     if (tray && process.platform === 'darwin') tray.setTitle(count ? String(count) : '');
     if (tray) tray.setToolTip(count ? `SINGULANCE (${count})` : 'SINGULANCE');
   },

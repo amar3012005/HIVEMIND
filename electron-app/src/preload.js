@@ -59,4 +59,10 @@ contextBridge.exposeInMainWorld('singulanceDesktop', Object.freeze({
   notify: (n) => call('native:notify', n),
   setUnread: (count) => call('native:unread', { count }),
   onNotificationClick: (cb) => subscribe('native:notification-click', cb),
+  onNotificationAction: (cb) => subscribe('native:notification-action', cb),
+  setNotificationPrefs: (prefs) => call('native:notify-prefs', prefs),
+  setTrayStatus: (status) => call('native:tray-status', status),
+  getLoginItem: () => call('native:login-item:get'),
+  setLoginItem: (enabled) => call('native:login-item:set', { enabled }),
+  haptic: () => {}, // Macs have no app haptic engine; kept so the API matches iOS.
 }));

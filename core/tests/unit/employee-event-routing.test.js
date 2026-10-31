@@ -368,7 +368,7 @@ test('mention-only routing: an in-company mention is queued without reading watc
 // ---------- the call from the classifier ----------
 import { classifyPendingActivity } from '../../src/connectors/composio/activity-relevance.js';
 function classifyRun(action, { routerCalls, cfg, queries }) {
-  const row = { id: `ev-${routerCalls.length}`, subscription_id: 'sub', org_id: ORG, user_id: USER, received_at: '2026-10-04T12:00:00Z', data: { sender: 'boss@acme.com', sender_verified: true, subject: '@leo hello' } };
+  const row = { id: `ev-${routerCalls.length}`, subscription_id: 'sub', org_id: ORG, user_id: USER, received_at: new Date(Date.now() - 60_000).toISOString(), data: { sender: 'boss@acme.com', sender_verified: true, subject: '@leo hello' } };
   const db = {
     userOrganization: { findUnique: async () => ({ isActive: true, role: 'admin' }) },
     $queryRawUnsafe: async sql => (queries?.push(sql), sql.includes('UPDATE hivemind_trigger_events')) ? [row] : sql.includes('runtime_enabled') ? [{ runtime_enabled: true }] : [{ toolkit: 'gmail', slug: 'GMAIL_NEW_GMAIL_MESSAGE', subject: USER, runtime_attention: true, runtime_attention_enabled_at: '2026-10-04T11:00:00Z' }],
@@ -535,7 +535,7 @@ test('switch off: the classifier runs exactly as before', async () => {
 
 test('switch on, Runtime off: events take the company relevance path and Runtime is not asked', async () => {
   const assessed = [];
-  const row = { id: 'e1', subscription_id: 'sub', org_id: ORG, user_id: USER, received_at: '2026-10-04T12:00:00Z', data: { subject: 'hello' } };
+  const row = { id: 'e1', subscription_id: 'sub', org_id: ORG, user_id: USER, received_at: new Date(Date.now() - 60_000).toISOString(), data: { subject: 'hello' } };
   const db = { userOrganization: { findUnique: async () => ({ isActive: true, role: 'admin' }) }, organization: { findUnique: async () => ({}) },
     $queryRawUnsafe: async sql => sql.includes('UPDATE hivemind_trigger_events') ? [row] : sql.includes('runtime_enabled') ? [{ runtime_enabled: false }] : sql.includes('memories') ? [] : [{ toolkit: 'gmail', slug: 'S', subject: USER, runtime_attention: true, runtime_attention_enabled_at: '2026-10-04T11:00:00Z' }],
     $executeRawUnsafe: async () => {} };
@@ -687,7 +687,7 @@ test('a wake is checked per row: events from a user who cannot see the employee 
 });
 
 test('the classifier does not wait for routing', async () => {
-  const row = { id: 'slow-route', subscription_id: 'sub', org_id: ORG, user_id: USER, received_at: '2026-10-04T12:00:00Z', data: { subject: '@leo' } };
+  const row = { id: 'slow-route', subscription_id: 'sub', org_id: ORG, user_id: USER, received_at: new Date(Date.now() - 60_000).toISOString(), data: { subject: '@leo' } };
   const db = { userOrganization: { findUnique: async () => ({ isActive: true, role: 'admin' }) },
     $queryRawUnsafe: async sql => sql.includes('UPDATE hivemind_trigger_events') ? [row] : sql.includes('runtime_enabled') ? [{ runtime_enabled: true }] : [{ toolkit: 'gmail', slug: 'S', subject: USER, runtime_attention: true, runtime_attention_enabled_at: '2026-10-04T11:00:00Z' }],
     $executeRawUnsafe: async () => {}, workspaceNotification: { upsert: async () => ({ id: 'n' }) } };

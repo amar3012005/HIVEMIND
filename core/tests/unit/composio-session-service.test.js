@@ -180,3 +180,33 @@ test('human app concepts resolve through the catalog to a preferred bound toolki
     else process.env.COMPOSIO_API_KEY = originalKey;
   }
 });
+
+test('exact tool slugs (an attention signal\'s tool hints) skip the search and fetch only those official schemas', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.COMPOSIO_API_KEY;
+  process.env.COMPOSIO_API_KEY = 'test-composio-key';
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    calls.push({ url: String(url), body });
+    const json = (payload) => new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    if (String(url).includes('/api/v3.1/connected_accounts?')) return json({ items: [{ id: 'ca_github', status: 'ACTIVE', toolkit: { slug: 'github' } }] });
+    if (String(url).endsWith('/api/v3/tool_router/session')) return json({ session_id: 'trs_exact' });
+    if (body?.slug === 'COMPOSIO_GET_TOOL_SCHEMAS') {
+      return json({ data: { tool_schemas: { GITHUB_GET_A_PULL_REQUEST: { toolkit: 'GITHUB', description: 'Get a pull request.', input_schema: { type: 'object', required: ['owner', 'repo', 'pull_number'] } } } } });
+    }
+    return new Response('unexpected request', { status: 500 });
+  };
+  try {
+    const service = await import(`../../src/connectors/composio/composio-service.js?exact-test=${Date.now()}`);
+    const found = await service.discoverSessionTools('org-exact', { toolkits: ['github'], useCases: ['act on a github event'],
+      exactToolSlugs: ['GITHUB_GET_A_PULL_REQUEST', 'GMAIL_SEND_EMAIL'] });
+    assert.equal(calls.filter((call) => call.body?.slug === 'COMPOSIO_SEARCH_TOOLS').length, 0, 'no semantic search');
+    assert.deepEqual(calls.find((call) => call.body?.slug === 'COMPOSIO_GET_TOOL_SCHEMAS').body.arguments.tool_slugs, ['GITHUB_GET_A_PULL_REQUEST'], 'only slugs of the requested toolkit');
+    assert.deepEqual(found.tools.map((tool) => [tool._composio.slug, tool.function.parameters.required]), [['GITHUB_GET_A_PULL_REQUEST', ['owner', 'repo', 'pull_number']]]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.COMPOSIO_API_KEY;
+    else process.env.COMPOSIO_API_KEY = originalKey;
+  }
+});

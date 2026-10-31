@@ -1023,6 +1023,7 @@ export async function discoverSessionTools(orgId, {
   callbackUrl = null,
   hydrateSchemas = true,
   candidateLimit = 8,
+  exactToolSlugs = [],
 }) {
   const { formatComposioSearch, extractWorkflowSessionId } = await import('./composio-search-formatter.js');
   const session = await getToolRouterSession(orgId, toolkits, {
@@ -1056,6 +1057,7 @@ export async function discoverSessionTools(orgId, {
       generateId: true,
     });
   const cacheKey = `${session.id}:${JSON.stringify({
+    exact: exactToolSlugs,
     cases: normalizedCases.map((item) => item.toLowerCase()),
     strategy: legalPayload.search_strategy,
     fields: legalPayload.queries,
@@ -1068,11 +1070,13 @@ export async function discoverSessionTools(orgId, {
   }
 
   const prefixes = session.toolkits.map((toolkit) => toolkit.replace(/[^a-z0-9]/gi, '').toUpperCase());
-  let searched = await executeSessionMeta(session.id, 'COMPOSIO_SEARCH_TOOLS', legalPayload, { timeoutMs: 20_000 });
+  // Exact slugs (already validated by the caller to belong to a requested toolkit) skip the search; only their schemas are fetched.
+  const exact = exactToolSlugs.filter((slug) => prefixes.some((prefix) => slug.startsWith(`${prefix}_`))).slice(0, 8);
+  let searched = exact.length ? { data: {} } : await executeSessionMeta(session.id, 'COMPOSIO_SEARCH_TOOLS', legalPayload, { timeoutMs: 20_000 });
   let primary = collectPrimaryToolSlugs(searched?.data, prefixes);
-  let slugs = [...(primary.size ? primary : collectToolSlugs(searched?.data, prefixes))];
-  const workflowId = extractWorkflowSessionId(searched);
-  if (searchMissesNamedToolkit(slugs, session.toolkits) && legalPayload.search_strategy !== 'tool_search') {
+  let slugs = exact.length ? exact : [...(primary.size ? primary : collectToolSlugs(searched?.data, prefixes))];
+  const workflowId = exact.length ? null : extractWorkflowSessionId(searched);
+  if (!exact.length && searchMissesNamedToolkit(slugs, session.toolkits) && legalPayload.search_strategy !== 'tool_search') {
     const retryPayload = {
       ...legalPayload,
       search_strategy: 'tool_search',

@@ -35,6 +35,11 @@ assert.match(androidBridge, /wss:\/\/next.singulancelabs.com\/api\/remote.mux/);
 assert.match(iosBridge, /kSecAttrAccessibleWhenUnlockedThisDeviceOnly/);
 assert.match(iosBridge, /message.frameInfo.isMainFrame/);
 assert.match(iosBridge, /completionHandler\(nil\)/);
+// OpenDot rooms: isolated storage, fixed hosts, the session cookie stays native.
+assert.match(iosBridge, /configuration.websiteDataStore = .nonPersistent\(\)/);
+assert.match(iosBridge, /allowedHosts: \[self.roomHost, "dots.singulancelabs.com"\]/);
+assert.match(iosBridge, /\^\/employees\/\[0-9a-fA-F\]\{8\}/);
+assert.doesNotMatch(iosBridge, /call\.resolve\(\[[^\]]*cookie/i);
 
 if (process.argv.includes('--release') || process.argv.includes('--packaged')) {
   assert.ok(!process.env.SINGULANCE_MOBILE_REMOTE_URL, 'Remote server.url must not be used for a store build.');

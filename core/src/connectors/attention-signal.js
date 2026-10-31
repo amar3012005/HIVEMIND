@@ -15,8 +15,10 @@ export const DEFAULT_SIGNAL_TOOL_SLUGS = Object.freeze({
   github: ['GITHUB_GET_A_PULL_REQUEST', 'GITHUB_LIST_PULL_REQUESTS_FILES', 'GITHUB_GET_AN_ISSUE', 'GITHUB_CREATE_AN_ISSUE_COMMENT'],
   linkedin: ['LINKEDIN_GET_POST_CONTENT'],
 });
-/** Most tool slugs named for one signal (Runtime maxTools default). */
+/** Most tool slugs named for one signal from the fixed list (Runtime maxTools default). */
 export const MAX_SIGNAL_TOOLS = 5;
+/** Most tool slugs one Runtime verdict may name for a signal (Runtime wake.maxTools ceiling). */
+export const MAX_VERDICT_TOOLS = 8;
 
 /**
  * Title and body excerpt of an event, never the whole provider envelope.
@@ -102,21 +104,54 @@ export function signalToolSlugs(toolkit, slugs = DEFAULT_SIGNAL_TOOL_SLUGS) {
 }
 
 const SLUG = /^[A-Z0-9]+(?:_[A-Z0-9]+)+$/u;
+const TOOLKIT = /^[a-z0-9_-]{1,60}$/u;
+const prefixOf = toolkit => `${String(toolkit).toUpperCase().replaceAll('-', '_')}_`;
+
+/**
+ * The tools Runtime's attention chose for a signal, grouped by app. A verdict that lists its `tools` may name tools of the company's
+ * other connected apps (a meeting request brings calendar tools); each must be a well-formed slug that starts with its own app. A verdict
+ * without `tools` (an older Runtime) keeps only slugs of the signal's own app, as before. The signal's own app comes first.
+ * @param {string} toolkit The signal's connected app.
+ * @param {object} verdict Runtime's verdict for the employees.
+ * @returns {{slugs: string[], others: Array<{toolkit: string, slugs: string[]}>}} Own slugs and the other apps' slugs, at most MAX_VERDICT_TOOLS in all.
+ */
+export function verdictToolGroups(toolkit, verdict) {
+  const own = String(toolkit).toLowerCase();
+  const slugs = [], others = new Map();
+  let used = 0;
+  const listed = Array.isArray(verdict?.tools)
+    ? verdict.tools.filter(tool => object(tool) && typeof tool.slug === 'string' && typeof tool.toolkit === 'string')
+    : verdict.toolSlugs.map(slug => ({ slug, toolkit: own }));
+  const chosen = new Set(Array.isArray(verdict?.toolSlugs) ? verdict.toolSlugs : listed.map(tool => tool.slug));
+  for (const tool of listed) {
+    if (used >= MAX_VERDICT_TOOLS) break;
+    const app = tool.toolkit.toLowerCase();
+    if (!chosen.has(tool.slug) || !SLUG.test(tool.slug) || !TOOLKIT.test(app) || !tool.slug.startsWith(prefixOf(app))) continue;
+    const bucket = app === own ? slugs : (others.get(app) ?? others.set(app, []).get(app));
+    if (bucket.includes(tool.slug)) continue;
+    bucket.push(tool.slug);
+    used += 1;
+  }
+  return { slugs, others: [...others].map(([app, list]) => ({ toolkit: app, slugs: list })) };
+}
+
 /**
  * The full signal for one event. When Runtime's attention judged it for the employees (`attentionForEmployees`), the assessment and
- * the tool slugs are that verdict's; otherwise the stored decision's assessment and the default slugs of the toolkit.
+ * the tool slugs are that verdict's; otherwise the stored decision's assessment and the fixed default slugs of the toolkit. The fixed
+ * list is also what a verdict that chose no tools carries, and what an event gets when Runtime is unreachable.
  * @param {{toolkit:string,data:unknown,decision?:object,routedBecause?:string}} input Event and its stored decision.
  * @returns {{evidence:object,providerRef:object,signal:object,assessment:object,appTools?:object,routedBecause?:string}} The signal.
  */
 export function attentionSignal({ toolkit, data, decision, routedBecause }) {
   const evidence = attentionEvidence(data);
   const verdict = object(decision?.attentionForEmployees) ? decision.attentionForEmployees : undefined;
-  const prefix = `${String(toolkit).toUpperCase()}_`;
-  const slugs = Array.isArray(verdict?.toolSlugs)
-    ? verdict.toolSlugs.filter(slug => typeof slug === 'string' && SLUG.test(slug) && slug.startsWith(prefix)).slice(0, MAX_SIGNAL_TOOLS)
-    : signalToolSlugs(toolkit);
+  const own = String(toolkit).toLowerCase();
+  const groups = Array.isArray(verdict?.toolSlugs)
+    ? verdictToolGroups(toolkit, verdict)
+    : { slugs: signalToolSlugs(toolkit), others: [] };
   decision = verdict ?? decision;
   return { evidence, providerRef: attentionProviderRef(toolkit, data), signal: signalHeader(data, toolkit, evidence.preview.length),
-    assessment: signalAssessment(decision), ...(slugs.length ? { appTools: { toolkit: String(toolkit).toLowerCase(), slugs } } : {}),
+    assessment: signalAssessment(decision),
+    ...(groups.slugs.length || groups.others.length ? { appTools: { toolkit: own, slugs: groups.slugs, ...(groups.others.length ? { others: groups.others } : {}) } } : {}),
     ...(routedBecause ? { routedBecause: text(routedBecause, 300) } : {}) };
 }

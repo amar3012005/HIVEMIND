@@ -1,5 +1,6 @@
 /** Existing receiver calls this narrow native service seam. No connector subscriptions or model work here. */
 import { createHmac, randomUUID } from 'node:crypto';
+import { productionConnectedToolkits } from './attention-toolkits.js';
 /** Verdict actions an `employees` assessment may answer. */
 const EMPLOYEE_ACTIONS = new Set(['retain', 'notify', 'wake']);
 /**
@@ -38,7 +39,32 @@ export function describeRuntimeAttentionConfig(env = process.env) {
   if (url.pathname !== '/internal/hivemind/runtime-attention') return { ok: false, reason: 'wrong_path' };
   return BRAIN_RUNNER_HOST.test(configured) ? { ok: false, reason: 'brain_runner' } : { ok: true };
 }
-export function createRuntimeAttentionBridge({ env = process.env, fetchImpl = fetch } = {}) {
+const TOOL_SLUG = /^[A-Z0-9]+(?:_[A-Z0-9]+)+$/u;
+const TOOLKIT = /^[a-z0-9_-]{1,60}$/u;
+/** Upper-case slug prefix of a toolkit. */
+const prefixOf = toolkit => `${toolkit.toUpperCase().replaceAll('-', '_')}_`;
+/**
+ * Whether a verdict's chosen tools stay inside the company's connected apps. Runtime built the list from the catalogue Core sent, so this
+ * only refuses a verdict that names an app outside it: every tool must belong to a sent app or to the event's own app (the toolkit of the
+ * always-included read tool, or the only toolkit named when no catalogue was sent), and its slug must start with its toolkit.
+ * @param {object} verdict Runtime's verdict.
+ * @param {string[]|undefined} sent Connected apps Core sent with the request.
+ * @returns {boolean} True when the tools are admissible or the verdict names none.
+ */
+export function toolsWithinCatalogue(verdict, sent) {
+  if (verdict.tools === undefined) return true;
+  const tools = verdict.tools;
+  if (!Array.isArray(tools) || tools.length > 8 || tools.some(tool => !tool || typeof tool.slug !== 'string' || !TOOL_SLUG.test(tool.slug)
+    || typeof tool.toolkit !== 'string' || !TOOLKIT.test(tool.toolkit) || !tool.slug.startsWith(prefixOf(tool.toolkit)))) return false;
+  const own = tools.find(tool => tool.ownRead === true)?.toolkit ?? tools[0]?.toolkit;
+  const allowed = new Set([...(sent ?? []), ...(own ? [own] : [])]);
+  if (!sent?.length) return tools.every(tool => tool.toolkit === own);
+  if (!Array.isArray(verdict.toolSlugs)) return false;
+  const byToolkit = new Set(tools.map(tool => tool.slug));
+  return tools.every(tool => allowed.has(tool.toolkit)) && verdict.toolSlugs.every(slug => byToolkit.has(slug));
+}
+
+export function createRuntimeAttentionBridge({ env = process.env, fetchImpl = fetch, connectedToolkits = env === process.env ? productionConnectedToolkits() : undefined } = {}) {
   const secret = env.HIVE_HARNESS_RUNNER_SERVICE_SECRET;
   const configured = env.HIVEMIND_RUNTIME_ATTENTION_URL;
   if (!warnedBrainRunner && BRAIN_RUNNER_HOST.test(String(configured ?? ''))) {
@@ -51,15 +77,31 @@ export function createRuntimeAttentionBridge({ env = process.env, fetchImpl = fe
   try { url = new URL(configured); } catch { return undefined; }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
     || url.pathname !== '/internal/hivemind/runtime-attention' || url.search || url.hash) return undefined;
-  async function call(operation, row, destination = 'runtime') {
+  async function post(operation, row, destination, extra) {
     // A Runtime destination sends no destination field, so a runner that predates it keeps answering unchanged.
     const response = await fetchImpl(url, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(8000),
       headers: { authorization: `Bearer ${runtimeAttentionToken(row, operation, secret, Date.now(), destination)}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ operation, eventId: row.id, orgId: row.org_id, userId: row.user_id, ...(destination === 'employees' ? { destination } : {}) }) });
+      body: JSON.stringify({ operation, eventId: row.id, orgId: row.org_id, userId: row.user_id, ...(destination === 'employees' ? { destination } : {}), ...extra }) });
     const text = await response.text();
     if (text.length > 32000) throw Error('runtime_attention_response_too_large');
+    return { response, text };
+  }
+  /**
+   * Only an assess carries the company's connected apps. A runner that predates the field refuses it with 400; the call is then repeated
+   * without it, so release order between Runtime and Core does not matter and the runner assesses with the event's own app only.
+   */
+  async function call(operation, row, destination = 'runtime') {
+    let sent = operation === 'assess' && connectedToolkits ? await connectedToolkits(row) : undefined;
+    if (!sent?.length) sent = undefined;
+    let { response, text } = await post(operation, row, destination, sent ? { connectedToolkits: sent } : {});
+    if (response.status === 400 && sent) { sent = undefined; ({ response, text } = await post(operation, row, destination, {})); }
     if (!response.ok) throw Error('runtime_attention_unavailable');
-    return JSON.parse(text);
+    const result = JSON.parse(text);
+    if (operation !== 'assess' || result === null || typeof result !== 'object') return result;
+    if (toolsWithinCatalogue(result, sent)) return result;
+    // A verdict that names an app outside the company's catalogue keeps its attention answer but loses its tool choice (Runtime then uses the fixed list).
+    const { toolSlugs: _slugs, tools: _tools, toolSelection: _selection, ...rest } = result;
+    return destination === 'employees' ? { ...rest, toolSlugs: [] } : rest;
   }
   // One bounded classification owns this adapter; cache only that event's response.
   const contexts = new Map();

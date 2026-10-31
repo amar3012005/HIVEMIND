@@ -312,6 +312,8 @@ model WorkspaceNotification {
   dedupeKey    String?   @map("dedupe_key") @db.VarChar(200)
   readAt       DateTime? @map("read_at") @db.Timestamptz(6)
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  /// Transaction id of the latest write, stamped by trigger; the cursor of the local-first change feed. Read through raw SQL only.
+  changeXid    Unsupported("xid8") @default(dbgenerated("'0'::xid8")) @map("change_xid")
 
   @@index([orgId, userId, createdAt(sort: Desc)])
   @@index([orgId, userId, readAt])
@@ -3616,6 +3618,8 @@ model DigitalEmployee {
   createdAt             DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt             DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt            DateTime?      @map("archived_at") @db.Timestamptz(6)
+  /// Transaction id of the latest write, stamped by trigger; the cursor of the local-first change feed. Read through raw SQL only.
+  changeXid             Unsupported("xid8") @default(dbgenerated("'0'::xid8")) @map("change_xid")
   org                   Organization   @relation("OrgDigitalEmployees", fields: [orgId], references: [id], onDelete: Cascade)
   team                  Team?          @relation("TeamDigitalEmployees", fields: [teamId], references: [id], onDelete: SetNull)
   creator               User           @relation("UserCreatedEmployees", fields: [createdBy], references: [id])

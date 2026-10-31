@@ -208,6 +208,7 @@ import { validateDomain } from './web/web-policy.js';
 import { getActiveOrganizationMembership, isOrganizationAdmin, requireSameOrganizationMember } from './workspace/access-policy.js';
 import { resolveTenantAccess } from './auth/tenant-access.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
+import { employeeRosterChanges, readChangeRequest, workspaceNotificationChanges } from './workspace/change-feed.js';
 import { announcementForAdmin, announcementMetrics, nextWorkspaceAnnouncement, normalizeAnnouncementInput, recordWorkspaceAnnouncementDelivery } from './workspace/announcements.js';
 import { createEmailNotificationSink } from './workspace/email-notification-projection.js';
 import { createSystemEmailDeliveryReceiptSink, recordCloudflareEmailDeliveryEvent } from './workspace/system-email-delivery-ledger.js';
@@ -8986,6 +8987,16 @@ const server = http.createServer(async (req, res) => {
     if (!await getActiveOrganizationMembership(prisma, { orgId: current.session.orgId, userId: current.session.userId })) {
       return jsonResponse(res, { error: 'Resource not found' }, 404);
     }
+    // Local-first sync: ?since=<cursor|start|now>&limit=1..200 returns the notifications that changed after the cursor.
+    if (url.searchParams.has('since')) {
+      const request = readChangeRequest(url);
+      if (request.error) return jsonResponse(res, { error: request.error }, 400, { 'Cache-Control': 'private, no-store' });
+      try {
+        return jsonResponse(res, await workspaceNotificationChanges(prisma, { orgId: current.session.orgId, userId: current.session.userId, ...request }), 200, { 'Cache-Control': 'private, no-store' });
+      } catch {
+        return jsonResponse(res, { error: 'Notifications unavailable' }, 503);
+      }
+    }
     const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit') || 20)));
     const unreadOnly = url.searchParams.get('unread') === 'true';
     try {
@@ -10398,7 +10409,20 @@ const server = http.createServer(async (req, res) => {
         : [];
       const membership = await getOrgMembership(current.session.userId, current.session.orgId);
       const isOrgAdmin = membership?.role === 'owner' || membership?.role === 'admin';
-      if (new URL(req.url, 'http://localhost').searchParams.get('archived') === '1') {
+      const rosterUrl = new URL(req.url, 'http://localhost');
+      // Local-first sync: ?since=<cursor|start|now>&limit=1..200 returns the employees that changed after the cursor.
+      if (rosterUrl.searchParams.has('since')) {
+        const request = readChangeRequest(rosterUrl);
+        if (request.error) return jsonResponse(res, { error: request.error }, 400, { 'Cache-Control': 'private, no-store' });
+        const { enrichEmployeesWithHyperState } = await import('./employees/hyper-state.js');
+        const orgId = current.session.orgId;
+        const feed = await employeeRosterChanges(prisma, {
+          orgId, userId: current.session.userId, teamIds, isOrgAdmin: isOrgAdmin && membership?.isActive !== false, ...request,
+          load: async (ids) => enrichEmployeesWithHyperState(await store.listByIds({ orgId, ids })),
+        });
+        return jsonResponse(res, feed, 200, { 'Cache-Control': 'private, no-store' });
+      }
+      if (rosterUrl.searchParams.get('archived') === '1') {
         // Archived employees are an administrator's Library view; they can unarchive, so only they see the list.
         const archived = isOrgAdmin && membership?.isActive !== false ? await store.listArchivedForOrg({ orgId: current.session.orgId }) : [];
         return jsonResponse(res, { employees: archived }, 200, { 'Cache-Control': 'private, no-store' });

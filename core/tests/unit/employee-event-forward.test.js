@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { routingConfig, routeApprovedEvent, flushEmployeeWakes, FORWARDED } from '../../src/connectors/employee-event-routing.js';
+import { fakeNotifyDb } from './fake-notify-db.js';
+import { routingConfig, routeApprovedEvent, flushEmployeeWakes, wakeIdFor, FORWARDED } from '../../src/connectors/employee-event-routing.js';
 
 const ORG = '11111111-1111-4111-8111-111111111111';
 const USER = '22222222-2222-4222-8222-222222222222';
@@ -184,4 +185,64 @@ test('live only: a forwarded event that happened longer ago than the age limit i
   assert.equal(calls, 0);
   assert.equal(totals.tooOld, 1);
   assert.deepEqual([deliveries[0].status, deliveries[0].skip_reason], ['skipped', 'too_old']);
+});
+
+/** Gives the in-memory Core the notification table and the employee read the bell notification makes. */
+function withBell(db) {
+  const bell = fakeNotifyDb({ employees: [{ id: LEO, orgId: ORG, name: 'Leo', createdBy: USER, archivedAt: null }], members: [[USER, ORG]] });
+  db.workspaceNotification = bell.db.workspaceNotification;
+  db.digitalEmployee.findFirst = bell.db.digitalEmployee.findFirst;
+  return bell.rows;
+}
+const route = (db, id, data, config, subscription = sub) => routeApprovedEvent(db, { orgId: ORG, userId: USER, event: { id, data }, sub: subscription }, { config, schedule: () => {} });
+
+test('bell: an admitted wake creates one workspace notification for the employee\'s owner, keyed by the wake id', async () => {
+  const { db, events } = fakeDb();
+  const rows = withBell(db);
+  events.set('ev1', mail);
+  await route(db, 'ev1', mail, forward);
+  await flushEmployeeWakes(db, { config: forward, forward: async () => ({ outcome: 'woken', targets: [{ employeeId: LEO, reason: 'mention', watchIds: [], status: 'wake', wake: 'admitted' }] }) });
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].orgId, rows[0].userId, rows[0].title, rows[0].body, rows[0].dedupeKey], [ORG, USER, 'Gmail → Leo', '“@leo invoice 42” — mentioned them', `employee-wake:${wakeIdFor(LEO, ['ev1'])}`]);
+  assert.equal(rows[0].data.href, `/hivemind/app/employee/dots/employee/${LEO}`);
+  assert.equal(rows[0].data.icon, 'gmail');
+});
+
+test('bell: observed, held, deferred, refused and unrouted events create no notification, and neither does a failed forward', async () => {
+  for (const target of [{ status: 'observed' }, { status: 'held' }, { status: 'wake', wake: 'deferred' }, { status: 'wake', wake: 'employee_unavailable' }]) {
+    const { db, events } = fakeDb();
+    const rows = withBell(db);
+    events.set('ev1', mail);
+    await route(db, 'ev1', mail, forward);
+    await flushEmployeeWakes(db, { config: forward, forward: async () => ({ outcome: 'not_woken', targets: [{ employeeId: LEO, reason: 'mention', watchIds: [], ...target }] }) });
+    assert.equal(rows.length, 0, JSON.stringify(target));
+  }
+  const skipped = fakeDb();
+  const rows = withBell(skipped.db);
+  skipped.events.set('ev1', mail);
+  await route(skipped.db, 'ev1', mail, forward);
+  await flushEmployeeWakes(skipped.db, { config: forward, forward: async () => ({ outcome: 'skipped', targets: [], skips: [{ employeeId: '*', reason: 'no_clear_owner' }] }) });
+  const failing = fakeDb();
+  const failedRows = withBell(failing.db);
+  failing.events.set('ev1', mail);
+  await route(failing.db, 'ev1', mail, forward);
+  await flushEmployeeWakes(failing.db, { config: forward, forward: async () => { throw Object.assign(new Error('unavailable'), { status: 503 }); } });
+  assert.equal(rows.length + failedRows.length, 0);
+});
+
+test('bell: a burst merged into one wake is one notification that counts its events; a replayed receipt adds none', async () => {
+  const { db, events, deliveries } = fakeDb();
+  const rows = withBell(db);
+  for (const n of [1, 2, 3]) { events.set(`pr${n}`, pr(n)); await route(db, `pr${n}`, pr(n), coalescing, ghSub); }
+  const receipt = async () => ({ outcome: 'woken', targets: [{ employeeId: LEO, reason: 'attention', watchIds: [], status: 'wake', wake: 'admitted' }] });
+  await flushEmployeeWakes(db, { config: coalescing, now: Date.now() + 61_000, forward: receipt, schedule: () => {} });
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].title, rows[0].data.eventCount, rows[0].dedupeKey], ['GitHub → Leo: 3 events', 3, `employee-wake:${wakeIdFor(LEO, ['pr1'])}`]);
+  assert.equal('icon' in rows[0].data, false);
+  // Core re-sends the same event after a lost answer: OpenDot replays the saved receipt and the notification stays single and unchanged.
+  rows[0].readAt = new Date(9000);
+  for (const row of deliveries.filter(item => item.toolkit === 'github')) row.status = 'forward_pending';
+  await flushEmployeeWakes(db, { config: coalescing, now: Date.now() + 122_000, forward: receipt, schedule: () => {} });
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].title, rows[0].readAt], ['GitHub → Leo: 3 events', new Date(9000)]);
 });

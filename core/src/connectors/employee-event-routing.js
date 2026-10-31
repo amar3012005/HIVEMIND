@@ -13,6 +13,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readRuntimeEnabled } from '../organizations/runtime-setting.js';
 import { dispatchOpenDotEvent, dispatchOpenDotRoutedEvent } from '../employees/open-dot-runtime-bridge.js';
 import { attentionSignal } from './attention-signal.js';
+import { notifyEmployeeWake } from './employee-wake-notification.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Audit sentinel for a skip that belongs to the event, not to one employee. */
@@ -679,6 +680,7 @@ async function flushEmployee(db, orgId, employeeId, now, config, deps) {
     await finish(keptIds, 'delivered');
     await watchOutcome(kitWatchIds);
     out.wakes += 1;
+    await notifyEmployeeWake(db, { orgId, employeeId, fallbackUserId: employee.tenantUserId, toolkit: kept[0].toolkit, title: wire[0].title, count: wire.length, reason: kept[0].reason, wakeId });
   } catch (error) {
     const code = clip(error?.message, 120) || 'delivery_failed';
     await watchOutcome(kitWatchIds, code);
@@ -824,6 +826,12 @@ export async function flushForwardedEvents(db, now, config, deps = {}) {
         .flatMap(target => (Array.isArray(target.watchIds) ? target.watchIds : [])).filter(id => UUID.test(String(id)));
       if (fired.length) await db.$executeRawUnsafe('UPDATE hivemind_employee_watches SET last_fired_at=now(),last_error=NULL,updated_at=now() WHERE id = ANY($1::uuid[]) AND org_id=$2', [...new Set(fired)], members[0].org_id);
       out.forwarded += 1;
+      // OpenDot answered which wakes it admitted (Observe, held, deferred and refused wakes are not admitted): each one gets its bell entry.
+      for (const target of Array.isArray(receipt?.targets) ? receipt.targets : []) {
+        if (target?.wake !== 'admitted') continue;
+        await notifyEmployeeWake(db, { orgId: members[0].org_id, employeeId: String(target.employeeId), fallbackUserId: members[0].user_id, toolkit: leader.event.toolkit, title: leader.event.title,
+          count: members.length, reason: target.reason, wakeId: wakeIdFor(String(target.employeeId), [leader.eventId]) });
+      }
     } catch (error) {
       const code = clip(error?.message, 120) || 'forward_failed';
       const attempts = Math.max(...members.map(row => row.attempts));

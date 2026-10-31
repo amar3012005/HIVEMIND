@@ -133,6 +133,14 @@ export function classifyPendingActivity(ctx) {
             JSON.stringify({ policy: POLICY, status: 'rejected', source: 'too_old', tooOld: true, maxEventAgeMs: routing.maxEventAgeMs }), row.id);
           continue;
         }
+        // The same provider message reached through two connections of one mailbox (the same account user connected it twice) is one
+        // event: only the earliest copy on an active subscription is assessed, routed and charged; later copies are recorded as duplicates.
+        const duplicateOf = await earlierCopy(db, row, sub[0].toolkit);
+        if (duplicateOf) {
+          await db.$executeRawUnsafe(`UPDATE hivemind_trigger_events SET relevance_status='rejected',relevance_decision=$1::jsonb,evaluated_at=now() WHERE id=$2`,
+            JSON.stringify({ policy: POLICY, status: 'rejected', source: 'duplicate', duplicateOf }), row.id);
+          continue;
+        }
         // With employee routing switched on, a company with Runtime switched off has no Chief of Staff to assess or receive events and takes the company relevance path.
         // With it switched off nothing here differs from before.
         const runtimeOn = routing.enabled ? await readRuntimeEnabled(db, ctx.orgId).catch(() => true) : true;
@@ -208,6 +216,37 @@ export function classifyPendingActivity(ctx) {
   })().catch(() => {}).finally(() => workers.delete(key));
   worker.promise = job;
   return job;
+}
+
+const MESSAGE_ID = /^[A-Za-z0-9._:@<>+=-]{4,200}$/;
+/**
+ * The provider message id of an event payload (`message_id`, else `messageId`), the key OpenDot's router also dedupes on.
+ * @param {unknown} data - The stored provider payload.
+ * @returns {string|null} The id, or null when the payload carries none.
+ */
+export function providerMessageId(data) {
+  const id = data && typeof data === 'object' ? (data.message_id ?? data.messageId) : undefined;
+  return typeof id === 'string' && MESSAGE_ID.test(id) ? id : null;
+}
+
+/**
+ * The earliest other copy of the same provider message for the same organization and account user, on an active subscription of the
+ * same toolkit within the 7-day window. Ordered by receipt time, then id, so every copy agrees on which one is canonical. Scoped to the
+ * account user as well as the organization: a personal account's event never reaches another person's employees.
+ * @param {object} db - Prisma client with raw queries.
+ * @param {{ id: string, org_id: string, user_id: string, received_at: string|Date, data: unknown }} row - The event being classified.
+ * @param {string} toolkit - The row's subscription toolkit.
+ * @returns {Promise<string|null>} The canonical copy's id when `row` is a later copy, else null.
+ */
+export async function earlierCopy(db, row, toolkit) {
+  const messageId = providerMessageId(row.data);
+  if (!messageId) return null;
+  const found = await db.$queryRawUnsafe(`SELECT e.id FROM hivemind_trigger_events e JOIN hivemind_trigger_subscriptions s ON s.id=e.subscription_id
+    WHERE e.org_id=$1 AND e.user_id=$2 AND e.id<>$3 AND s.status='active' AND s.toolkit=$4
+      AND e.received_at > now()-interval '7 days' AND COALESCE(e.data->>'message_id', e.data->>'messageId')=$5
+      AND (e.received_at, e.id::text) < ($6::timestamptz, $3::text)
+    ORDER BY e.received_at, e.id LIMIT 1`, row.org_id, row.user_id, row.id, toolkit, messageId, new Date(row.received_at).toISOString());
+  return found[0]?.id ? String(found[0].id) : null;
 }
 
 /** Recover the existing durable ledger without requiring a browser visit or new webhook. */

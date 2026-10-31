@@ -24,6 +24,7 @@ test('allowlist: hashed assets and app/room shells only on the three hosts', () 
   assert.equal(classify({ url: 'https://singulancelabs.com/hivemind/static/css/main.0a1b2c3d.css' }).kind, 'asset');
   assert.equal(classify({ url: `https://${ROOM}/employees/123`, headers: DOC }).kind, 'shell');
   assert.equal(classify({ url: 'https://singulancelabs.com/hivemind/app/overview', headers: DOC }).kind, 'shell');
+  assert.equal(classify({ url: 'https://dots.singulancelabs.com/dots/abc', headers: DOC }).kind, 'pass');
   assert.equal(classify({ url: 'https://singulancelabs.com/pricing', headers: DOC }).kind, 'pass');
   assert.equal(classify({ url: 'https://evil.com/assets/index-BxK3a9Zq.js' }).kind, 'pass');
   assert.equal(classify({ url: 'https://api.singulancelabs.com/assets/index-BxK3a9Zq.js' }).kind, 'pass');

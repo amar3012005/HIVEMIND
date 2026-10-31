@@ -5,6 +5,7 @@
 const SCREEN_HOSTS = ['singulancelabs.com', 'runtime-runner.singulancelabs.com', 'dots.singulancelabs.com'];
 const APP_HOST = 'singulancelabs.com';
 const APP_PREFIX = '/hivemind/app';
+const SHELL_FROM_SERVER = new Set(['dots.singulancelabs.com']);
 const MANIFEST_PATH = '/ui-manifest.json';
 const MAX_PATH = 300;
 
@@ -93,6 +94,9 @@ function classifyScreenRequest({ url, method = 'GET', headers } = {}) {
     const inApp = u.pathname === APP_PREFIX || u.pathname.startsWith(`${APP_PREFIX}/`);
     return inApp ? { kind: 'shell', host } : pass;
   }
+  // OpenDot renders each room on the server (Next.js), so one stored shell cannot stand in for every room page;
+  // its own service worker keeps room shells per account. Only its hashed assets are served from here.
+  if (SHELL_FROM_SERVER.has(host)) return pass;
   return { kind: 'shell', host };
 }
 

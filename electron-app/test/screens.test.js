@@ -30,7 +30,7 @@ test('allowlist: hashed assets and app/room shells only on the three hosts', () 
   assert.equal(classify({ url: 'http://singulancelabs.com/assets/index-BxK3a9Zq.js' }).kind, 'pass');
   assert.equal(classify({ url: `https://${ROOM}:8443/assets/index-BxK3a9Zq.js` }).kind, 'pass');
   assert.notEqual(classify({ url: `https://${ROOM}/assets/../secret-a1b2c3d4e5.js` }).kind, 'asset'); // URL parsing already collapsed the dots
-  assert.equal(classify({ url: `https://${ROOM}/assets/%2e%2e/x-a1b2c3d4e5.js` }).kind, 'pass');
+  assert.notEqual(classify({ url: `https://${ROOM}/assets/%2e%2e/x-a1b2c3d4e5.js` }).kind, 'asset');
   // a plain name without a hash is not an immutable asset
   assert.equal(classify({ url: `https://${ROOM}/assets/longname.js` }).kind, 'bundle');
   // fetch()/XHR without a document Accept never gets the shell

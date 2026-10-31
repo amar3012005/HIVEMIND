@@ -17,7 +17,7 @@ export interface SingulanceNative {
   }): Promise<{status: number; headers: Record<string,string>; data: string; encoding?: 'text' | 'base64'}>;
   /** Asks the account workspace-access endpoint (flag plus grant) with the stored session; only the verdict returns. */
   workspaceAccess(): Promise<{status: number; enabled?: boolean}>;
-  /** iOS: opens `/employees/<uuid>` of the OpenDot Runtime host full screen in an isolated web view signed in with the stored session. */
+  /** iOS and Android: opens `/employees/<uuid>` of the OpenDot Runtime host full screen in an isolated web view signed in with the stored session. */
   openRoom(options: {path: string}): Promise<void>;
   closeRoom(): Promise<void>;
   addListener(event: 'roomClosed', listener: () => void): Promise<{remove():Promise<void>}>;

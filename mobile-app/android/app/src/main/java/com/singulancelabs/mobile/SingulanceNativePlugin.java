@@ -129,6 +129,46 @@ public class SingulanceNativePlugin extends Plugin {
             String responseType=call.getString("responseType","text");if(!Set.of("text","base64").contains(responseType))throw new IllegalArgumentException();result.put("data","base64".equals(responseType)?Base64.encodeToString(bytes.toByteArray(),Base64.NO_WRAP):bytes.toString(StandardCharsets.UTF_8.name()));result.put("encoding",responseType);call.resolve(result);
         }catch(Exception ignored){call.reject("Native request failed.");}});
     }
+    // OpenDot employee rooms: https://runtime-runner.singulancelabs.com authenticates a Control session cookie
+    // (Set-Cookie of GET /auth/session for the stored bearer). The cookie goes from this class into
+    // RoomActivity's isolated WebView and never reaches JavaScript or the Runner cookie jar.
+    private final OkHttpClient control = http.newBuilder().cookieJar(CookieJar.NO_COOKIES).build();
+    private Cookie controlCookie() throws Exception {
+        String token = readCredential("cpToken"); if (token == null) return null;
+        Request request = new Request.Builder().url("https://api.singulancelabs.com/auth/session").header("Authorization", "Bearer " + token).header("Accept", "application/json").build();
+        try (Response response = control.newCall(request).execute()) {
+            if (response.code() != 200) return null;
+            for (Cookie cookie : Cookie.parseAll(request.url(), response.headers())) if (RoomPolicy.isControlSessionCookie(cookie.name(), cookie.secure(), cookie.domain())) return cookie;
+        }
+        return null;
+    }
+    @PluginMethod public void workspaceAccess(PluginCall call) {
+        try { requireTrusted(); } catch (Exception ignored) { call.reject("Workspace access could not be checked."); return; }
+        executor.execute(() -> { try {
+            Cookie cookie = controlCookie();
+            if (cookie == null) { JSObject signedOut = new JSObject(); signedOut.put("status", 401); call.resolve(signedOut); return; }
+            Request request = new Request.Builder().url("https://next.singulancelabs.com/__hivemind/account-mode-access").header("Accept", "application/json").header("Cookie", cookie.name() + "=" + cookie.value()).build();
+            try (Response response = control.newCall(request).execute()) {
+                JSObject result = new JSObject(); result.put("status", response.code());
+                String text = response.body() == null ? "" : response.body().string();
+                try { JSONObject json = new JSONObject(text); if (json.get("enabled") instanceof Boolean) result.put("enabled", json.getBoolean("enabled")); } catch (Exception ignoredJson) { /* Non-JSON body: status only. */ }
+                call.resolve(result);
+            }
+        } catch (Exception ignored) { call.reject("Workspace access could not be checked."); } });
+    }
+    @PluginMethod public void openRoom(PluginCall call) {
+        final String url;
+        try { requireTrusted(); url = RoomPolicy.roomUrl(call.getString("path")); } catch (Exception ignored) { call.reject("Room is not allowed."); return; }
+        executor.execute(() -> { try {
+            Cookie cookie = controlCookie();
+            if (cookie == null) { call.reject("Room could not open."); return; }
+            getActivity().runOnUiThread(() -> RoomActivity.open(getActivity(), url, cookie.toString(), () -> notifyListeners("roomClosed", new JSObject()), call::resolve));
+        } catch (Exception ignored) { call.reject("Room could not open."); } });
+    }
+    @PluginMethod public void closeRoom(PluginCall call) {
+        try { requireTrusted(); } catch (Exception ignored) { call.reject("Room could not close."); return; }
+        getActivity().runOnUiThread(() -> { RoomActivity.closeSilently(); call.resolve(); });
+    }
     private void event(String id,String type,String data){JSObject value=new JSObject();value.put("id",id);value.put("type",type);if(data!=null)value.put("data",data);notifyListeners("streamEvent",value);}
     @PluginMethod public void openStream(PluginCall call){
         final String id=call.getString("id"),endpoint=call.getString("endpoint");

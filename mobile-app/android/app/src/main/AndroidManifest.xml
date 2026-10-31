@@ -44,6 +44,13 @@
 
         </activity>
 
+        <!-- OpenDot employee room: isolated WebView without the Capacitor bridge. -->
+        <activity
+            android:name=".RoomActivity"
+            android:exported="false"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|uiMode|density"
+            android:theme="@style/AppTheme.NoActionBar" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

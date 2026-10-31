@@ -41,6 +41,28 @@ assert.match(iosBridge, /allowedHosts: \[self.roomHost, "dots.singulancelabs.com
 assert.match(iosBridge, /\^\/employees\/\[0-9a-fA-F\]\{8\}/);
 assert.doesNotMatch(iosBridge, /call\.resolve\(\[[^\]]*cookie/i);
 
+// Android parity: workspaceAccess/openRoom with the same rules, in an isolated bridge-less activity.
+const roomActivity = await readFile('android/app/src/main/java/com/singulancelabs/mobile/RoomActivity.java', 'utf8');
+const roomPolicy = await readFile('android/app/src/main/java/com/singulancelabs/mobile/RoomPolicy.java', 'utf8');
+assert.match(androidBridge, /@PluginMethod public void workspaceAccess/);
+assert.match(androidBridge, /@PluginMethod public void openRoom/);
+assert.match(androidBridge, /@PluginMethod public void closeRoom/);
+assert.match(androidBridge, /RoomPolicy\.roomUrl\(call\.getString\("path"\)\)/);
+assert.match(androidBridge, /\/auth\/session/);
+assert.match(roomPolicy, /\^\/employees\/\[0-9a-fA-F\]\{8\}/);
+assert.match(roomPolicy, /Set\.of\(ROOM_HOST, "dots\.singulancelabs\.com"\)/);
+assert.match(roomActivity, /setSupportMultipleWindows\(false\)/);
+assert.match(roomActivity, /setJavaScriptCanOpenWindowsAutomatically\(false\)/);
+assert.match(roomActivity, /RoomPolicy\.allowsNavigation/);
+assert.match(roomActivity, /removeAllCookies/);
+assert.match(roomActivity, /deleteAllData/);
+assert.doesNotMatch(roomActivity, /addJavascriptInterface|getBridge|Capacitor/);
+assert.doesNotMatch(androidBridge + roomActivity, /cookie[^;\n]*call\.resolve|result\.put\("[a-z]*[Cc]ookie/);
+assert.match(manifest, /android:name="\.RoomActivity"\s+android:exported="false"/);
+// No token in plain SharedPreferences: values are AES-GCM ciphertext (Keystore key) before they reach preferences.
+assert.match(androidBridge, /putString\(key,encrypted\)/);
+assert.doesNotMatch(androidBridge, /putString\(key,value\)/);
+
 if (process.argv.includes('--release') || process.argv.includes('--packaged')) {
   assert.ok(!process.env.SINGULANCE_MOBILE_REMOTE_URL, 'Remote server.url must not be used for a store build.');
   const html = await readFile('www/index.html', 'utf8');

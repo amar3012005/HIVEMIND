@@ -17,3 +17,9 @@ test('release guard rejects the development placeholder', async () => {
   assert.match(await readFile('scripts/release-evidence.mjs', 'utf8'), /nativeAuthentication/);
   assert.match(source, /Signing configuration missing/);
 });
+test('Android employee room is isolated, allowlisted and bridge-less', async () => {
+  const room = await readFile('android/app/src/main/java/com/singulancelabs/mobile/RoomActivity.java', 'utf8');
+  assert.match(room, /RoomPolicy.allowsNavigation/);
+  assert.doesNotMatch(room, /addJavascriptInterface/);
+  assert.match(await readFile('android/app/src/main/AndroidManifest.xml', 'utf8'), /\.RoomActivity"\s+android:exported="false"/);
+});

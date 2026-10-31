@@ -16,7 +16,7 @@ test('the near-miss probability is configurable and bounded', () => {
 /** Runs the real relevance decision with a provider that answers one verdict. */
 const decide = result => decideActivityRelevance({ event: { toolkit: 'gmail', data: { subject: 'Pricing', message_text: 'Can we talk' } }, context: {}, env: {}, provider: { decideChoice: async () => result } });
 
-function classify({ decision, runtimeOn, target, routerCalls, writes }) {
+function classify({ decision, runtimeOn, target, routerCalls, writes, config = on, targeterCalls = [] }) {
   const row = { id: 'ev', subscription_id: 'sub', org_id: ORG, user_id: USER, received_at: '2026-10-30T12:00:00Z', data: { sender: 'a@b.co', subject: 'Pricing', message_text: 'Can we talk' } };
   const db = {
     userOrganization: { findUnique: async () => ({ isActive: true, role: 'admin' }) },
@@ -25,9 +25,9 @@ function classify({ decision, runtimeOn, target, routerCalls, writes }) {
       : sql.includes('FROM memories') ? [] : [{ toolkit: 'gmail', slug: 'GMAIL_NEW_GMAIL_MESSAGE', subject: USER, runtime_attention: true, runtime_attention_enabled_at: '2026-10-01T00:00:00Z' }],
     $executeRawUnsafe: async (sql, ...args) => { writes.push({ sql, args }); },
   };
-  return classifyPendingActivity({ orgId: ORG, userId: USER, allowedAccountIds: ['a'], prisma: db, routingConfig: on,
-    relevanceDecider: async () => decision, employeeTargeter: async () => target,
-    employeeRouter: async (_db, input, deps) => { routerCalls.push({ mentionsOnly: deps?.mentionsOnly === true, attentionTarget: deps?.attentionTarget?.employeeId ?? null }); } });
+  return classifyPendingActivity({ orgId: ORG, userId: USER, allowedAccountIds: ['a'], prisma: db, routingConfig: config,
+    relevanceDecider: async () => decision, employeeTargeter: async () => { targeterCalls.push(1); return target; },
+    employeeRouter: async (_db, input, deps) => { routerCalls.push({ mentionsOnly: deps?.mentionsOnly === true, attentionTarget: deps?.attentionTarget?.employeeId ?? null, ...(deps?.nearMiss ? { nearMiss: true } : {}) }); } });
 }
 const stored = writes => JSON.parse(writes.find(w => w.sql.includes("SET relevance_status=$1,relevance_decision=$2")).args[1]);
 const near = { status: 'rejected', choice: 'useful_company_work', probability: 0.53, margin: 0.25, source: 'jev', policy: 'company_activity_relevance_v3', nearMiss: true };
@@ -62,4 +62,17 @@ test('the relevance decision marks only a useful verdict between the near-miss f
   assert.equal(noise.nearMiss, undefined);
   const high = await decide({ choice: 'useful_company_work', probability: 0.8, margin: 0.3 });
   assert.equal(high.status, 'approved'); assert.equal(high.nearMiss, undefined);
+});
+
+test('a company OpenDot routes: Core makes no employee choice and forwards a near miss for OpenDot to decide', async () => {
+  const forward = routingConfig({ HIVEMIND_EMPLOYEE_EVENT_ROUTING: '1', HIVEMIND_EMPLOYEE_EVENT_FORWARD_ORGS: ORG });
+  const writes = [], routerCalls = [], targeterCalls = [];
+  await classify({ decision: near, runtimeOn: false, target: owner, routerCalls, writes, config: forward, targeterCalls });
+  assert.equal(targeterCalls.length, 0, 'no employee choice in Core');
+  assert.equal(stored(writes).status, 'rejected');
+  assert.deepEqual(routerCalls, [{ mentionsOnly: true, attentionTarget: null, nearMiss: true }]);
+  const approved = [], approvedRoute = [];
+  await classify({ decision: { ...near, status: 'approved', nearMiss: undefined }, runtimeOn: false, target: owner, routerCalls: approvedRoute, writes: approved, config: forward, targeterCalls });
+  assert.deepEqual(approvedRoute, [{ mentionsOnly: false, attentionTarget: null }]);
+  assert.equal(targeterCalls.length, 0);
 });

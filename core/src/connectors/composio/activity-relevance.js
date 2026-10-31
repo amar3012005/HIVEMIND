@@ -94,6 +94,8 @@ export function classifyPendingActivity(ctx) {
   const job = (async () => {
     const db = ctx.prisma;
     const routing = ctx.routingConfig || routingConfig();
+    // A company switched to OpenDot routing gets no employee choice here: OpenDot decides from the forwarded event.
+    const forwarded = routing.enabled && routing.forwardOrgs?.has(String(ctx.orgId).toLowerCase()) === true;
     const membership = await db.userOrganization.findUnique({ where: { userId_orgId: { userId: ctx.userId, orgId: ctx.orgId } }, select: { isActive: true, role: true, deactivatedAt: true } });
     if (!membership?.isActive || membership.deactivatedAt || !['owner', 'admin'].includes(membership.role)) return;
     for (let batch = 0; batch < 8; batch++) {
@@ -119,8 +121,8 @@ export function classifyPendingActivity(ctx) {
         const bridge = runtimeOn ? (ctx.runtimeAttention || createRuntimeAttentionBridge()) : undefined;
         // Routing runs once per event, after the decision: an approved event takes mentions, watches and the attention layer's
         // employee choice; any other event only an in-company @mention. Started after the decision is stored and never awaited.
-        const routeToEmployees = (mentionsOnly, attention) => (ctx.employeeRouter || routeEventGuarded)(db, { orgId: ctx.orgId, userId: ctx.userId, event: row, sub: sub[0] },
-          { config: routing, ...(mentionsOnly ? { mentionsOnly: true } : attention?.targetEmployeeId ? { attentionTarget: { employeeId: attention.targetEmployeeId } } : {}) }).catch(() => {});
+        const routeToEmployees = (mentionsOnly, attention, nearMiss) => (ctx.employeeRouter || routeEventGuarded)(db, { orgId: ctx.orgId, userId: ctx.userId, event: row, sub: sub[0] },
+          { config: routing, ...(mentionsOnly ? { mentionsOnly: true } : attention?.targetEmployeeId ? { attentionTarget: { employeeId: attention.targetEmployeeId } } : {}), ...(nearMiss ? { nearMiss: true } : {}) }).catch(() => {});
         if (bridge && row.relevance_decision?.runtimeAttention?.policy==='runtime_attention_v3'
           && ['notify','wake'].includes(row.relevance_decision.runtimeAttention.action) && !row.relevance_decision.runtimeDelivery) {
           try { await deliverAttention(db,ctx,row,row.relevance_decision,bridge,sub[0].toolkit); if (routing.enabled) void routeToEmployees(false); continue; }
@@ -141,7 +143,7 @@ export function classifyPendingActivity(ctx) {
           receipt = await (ctx.relevanceDecider || decideActivityRelevance)({ event: { ...row, toolkit: sub[0].toolkit }, context });
           // Runtime off: the same attention step also picks the employee whose role or recent work owns the event. A near miss
           // (useful company work below the approval confidence) is promoted only when an employee clearly owns it.
-          if (routing.enabled && !runtimeOn && (receipt.status === 'approved' || receipt.nearMiss === true)) {
+          if (routing.enabled && !forwarded && !runtimeOn && (receipt.status === 'approved' || receipt.nearMiss === true)) {
             const target = await (ctx.employeeTargeter || (async () => decideEmployeeTarget({ event: { app: sub[0].toolkit, title: clip(row.data?._hivemind?.title || row.data?.subject || row.data?.title, 200), sender: clip(row.data?.sender || row.data?.from, 120), preview: connectedEventPreview(row.data || {}, 900) },
               roster: await loadEmployeeRoster(db, ctx.orgId, await loadRoutableEmployees(db, ctx.orgId, ctx.userId)), company: { company: context.company } })))().catch(() => null);
             if (target) receipt = { ...receipt, ...(receipt.status === 'approved' ? {} : { status: 'approved', promotedByOwner: true }), employeeAttention: { policy: EMPLOYEE_TARGET_POLICY, targetEmployeeId: target.employeeId, probability: target.probability, margin: target.margin, because: target.because } };
@@ -160,7 +162,7 @@ export function classifyPendingActivity(ctx) {
             continue;
           }
         }
-        if (routing.enabled) void routeToEmployees(receipt.status !== 'approved', receipt.employeeAttention);
+        if (routing.enabled) void routeToEmployees(receipt.status !== 'approved', receipt.employeeAttention, forwarded && !runtimeOn && receipt.status !== 'approved' && receipt.nearMiss === true);
       }
       if (rows.length < 6 && !worker.rerun) break;
     }

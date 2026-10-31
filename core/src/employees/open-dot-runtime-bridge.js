@@ -151,3 +151,15 @@ export async function dispatchOpenDotEvent(payload, { env = process.env, fetchIm
   const token = env.OPEN_DOT_EVENT_BRIDGE_TOKEN || env.OPEN_DOT_RUNTIME_BRIDGE_TOKEN;
   return postDot('event', payload, { env: { ...env, OPEN_DOT_RUNTIME_BRIDGE_TOKEN: token }, fetchImpl });
 }
+
+/**
+ * Forwards one approved, untargeted connected-app event to OpenDot, which decides the employee and wakes it (`route-event`).
+ * Same bearer and secret as {@link dispatchOpenDotEvent}. OpenDot answers a replay of the same event id with its saved decision.
+ * @param {object} payload Version 1 request built by forwardRequest in employee-event-routing.js.
+ * @param {{env?:object,fetchImpl?:Function}} [options] Environment and fetch for tests.
+ * @returns {Promise<object>} OpenDot's decision: outcome, targets and skips.
+ */
+export async function dispatchOpenDotRoutedEvent(payload, { env = process.env, fetchImpl } = {}) {
+  const token = env.OPEN_DOT_EVENT_BRIDGE_TOKEN || env.OPEN_DOT_RUNTIME_BRIDGE_TOKEN;
+  return postDot('route-event', payload, { env: { ...env, OPEN_DOT_RUNTIME_BRIDGE_TOKEN: token }, fetchImpl });
+}

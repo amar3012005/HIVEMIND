@@ -6,15 +6,19 @@
  * Guards: one delivery per (event, employee), bursts for one employee coalesce into one wake, a per-hour wake cap, and no wake
  * on content a bot, an employee or Runtime produced. Every delivery or skip is recorded with its reason.
  * Off unless HIVEMIND_EMPLOYEE_EVENT_ROUTING=1. Event content is untrusted and is delivered as data.
+ * A company listed in HIVEMIND_EMPLOYEE_EVENT_FORWARD_ORGS is routed by OpenDot instead: each event is forwarded untargeted
+ * through the same delivery table and retry (see forwardApprovedEvent), and nothing here decides its target.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { readRuntimeEnabled } from '../organizations/runtime-setting.js';
-import { dispatchOpenDotEvent } from '../employees/open-dot-runtime-bridge.js';
+import { dispatchOpenDotEvent, dispatchOpenDotRoutedEvent } from '../employees/open-dot-runtime-bridge.js';
 import { attentionSignal } from './attention-signal.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Audit sentinel for a skip that belongs to the event, not to one employee. */
 export const EVENT_LEVEL = '*';
+/** Delivery-row employee id of an event forwarded to OpenDot, which decides its target. */
+export const FORWARDED = '>opendot';
 const FREE_MAIL = new Set(['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com', 'yahoo.com', 'icloud.com', 'me.com', 'proton.me', 'protonmail.com', 'aol.com', 'gmx.de', 'gmx.net', 'web.de']);
 /** Hosts anyone can publish on: an address there proves nothing about the company, so none of them can be the company domain. */
 const SHARED_HOSTING = ['github.io', 'githubusercontent.com', 'vercel.app', 'netlify.app', 'calendly.com', 'notion.site', 'notion.so', 'wixsite.com', 'wix.com', 'webflow.io', 'herokuapp.com', 'pages.dev', 'workers.dev', 'web.app', 'firebaseapp.com', 'azurewebsites.net', 'blogspot.com', 'wordpress.com', 'squarespace.com', 'carrd.co', 'framer.app', 'framer.website', 'ghost.io', 'substack.com', 'medium.com', 'linktr.ee', 'typeform.com', 'hubspot.com', 'mailchimpsites.com', 'surge.sh', 'render.com', 'onrender.com', 'fly.dev', 'railway.app', 'repl.co', 'glitch.me', 'bubbleapps.io', 'airtable.com', 'google.com', 'sites.google.com', 'canva.site', 'my.canva.site', 'carrd.co', 'godaddysites.com', 'weebly.com', 'myshopify.com', 'zoom.us', 'slack.com', 'linkedin.com', 'facebook.com', 'instagram.com', 'x.com', 'twitter.com'];
@@ -77,6 +81,8 @@ export function routingConfig(env = process.env) {
     // GitHub has no link between a login and a company member, so a GitHub author counts as inside only when GitHub itself calls
     // them OWNER or MEMBER of an organization this company lists here. Empty by default: GitHub mentions then never wake anyone.
     githubOrgs: new Set(String(env.HIVEMIND_EMPLOYEE_EVENT_GITHUB_ORGS ?? '').split(',').map(item => item.trim().toLowerCase()).filter(Boolean)),
+    // Companies whose events OpenDot routes: Core only forwards them. Empty by default, so every company keeps Core's routing.
+    forwardOrgs: new Set(String(env.HIVEMIND_EMPLOYEE_EVENT_FORWARD_ORGS ?? '').split(',').map(item => item.trim().toLowerCase()).filter(item => UUID.test(item))),
   });
 }
 
@@ -453,6 +459,7 @@ export async function routeApprovedEvent(db, { orgId, userId, event, sub }, deps
   if (!config.enabled) return { skipped: 'routing_disabled' };
   if (!UUID.test(orgId || '') || !UUID.test(userId || '') || !sub?.slug) return { skipped: 'scope_unavailable' };
   await ensureEmployeeEventStore(db);
+  if (config.forwardOrgs?.has(orgId.toLowerCase())) return forwardApprovedEvent(db, { orgId, userId, event, sub }, { ...deps, config });
   const facts = eventFacts(sub.toolkit, sub.slug, event.data, config);
   // Mentions are routed for every received event, approved or not: addressing an employee by name is the signal. Watches wait for approval.
   const mentionsOnly = deps.mentionsOnly === true;
@@ -532,6 +539,7 @@ export async function flushEmployeeWakes(db, deps = {}) {
     try { const part = await flushEmployee(db, orgId, employeeId, now, config, deps); for (const key of Object.keys(totals)) totals[key] += part[key] ?? 0; }
     catch { totals.failed += 1; }
   }
+  if (config.forwardOrgs?.size) Object.assign(totals, await flushForwardedEvents(db, now, config, deps));
   return totals;
 }
 
@@ -600,6 +608,118 @@ async function flushEmployee(db, orgId, employeeId, now, config, deps) {
       const attempts = Math.max(...kept.map(row => row.attempts));
       const retryAt = new Date(now.getTime() + Math.min(60_000 * 2 ** (attempts - 1), 900_000)).toISOString();
       await db.$executeRawUnsafe("UPDATE hivemind_employee_event_deliveries SET status='pending',last_error=$2,retry_at=$3::timestamptz WHERE id = ANY($1::uuid[])", keptIds, code, retryAt);
+    }
+  }
+  return out;
+}
+
+// ---------- forwarding to OpenDot ----------
+/**
+ * Routing step for a company switched to OpenDot routing: records the event as one `forward_pending` delivery row (employee
+ * {@link FORWARDED}, reason `forward_<relevance>`) and schedules the flush. No mention, watch, sender rule or employee choice is
+ * evaluated here. One row per event; a row still waiting is raised from `mention_only` or `near_miss` to `approved`.
+ * @param {object} db Prisma client.
+ * @param {object} input See {@link routeApprovedEvent}.
+ * @param {object} deps `config`, `mentionsOnly`, `nearMiss`, `schedule`.
+ * @returns {Promise<object>} `{forwarded, relevance}`, or `{skipped}`.
+ */
+export async function forwardApprovedEvent(db, { orgId, userId, event, sub }, deps) {
+  const facts = eventFacts(sub.toolkit, sub.slug, event.data, deps.config);
+  const relevance = deps.nearMiss === true ? 'near_miss' : deps.mentionsOnly === true ? 'mention_only' : 'approved';
+  // An event that was not approved matters to OpenDot only for an @mention, as in Core's own routing.
+  if (relevance === 'mention_only' && !facts.mentionText.includes('@')) return { skipped: 'no_mention' };
+  await db.$queryRawUnsafe(`INSERT INTO hivemind_employee_event_deliveries (id,org_id,user_id,employee_id,event_id,toolkit,trigger_slug,reason,status,summary)
+    VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,'forward_pending',$9) ON CONFLICT(event_id,employee_id) DO UPDATE SET reason=EXCLUDED.reason
+    WHERE hivemind_employee_event_deliveries.status='forward_pending' AND EXCLUDED.reason='forward_approved' RETURNING id`,
+  randomUUID(), orgId, userId, FORWARDED, event.id, sub.toolkit, sub.slug, `forward_${relevance}`, clip(facts.title || facts.body, 140));
+  (deps.schedule ?? (() => scheduleFlush(db, `${orgId}:${FORWARDED}`, 500, deps)))({ employeeId: FORWARDED });
+  return { forwarded: true, relevance };
+}
+
+const WATCH_FILTER_KEYS = ['from', 'label', 'keyword', 'repo'];
+/**
+ * The request OpenDot's `route-event` receives for one forwarded row: the event's facts, how its sender relates to the company,
+ * and the watches allowed to see it (an organization-wide account's events reach only watches of current owners and admins, a
+ * personal account's only its owner's). Core owns these facts; OpenDot decides from them.
+ * @param {object} db Prisma client.
+ * @param {object} row Delivery row.
+ * @param {object} config Routing limits.
+ * @returns {Promise<object|null>} The request, or null when the event is gone.
+ */
+export async function forwardRequest(db, row, config) {
+  const [event] = await db.$queryRawUnsafe(`SELECT e.id,e.data,e.occurred_at,e.received_at,e.relevance_decision,s.subject FROM hivemind_trigger_events e
+    LEFT JOIN hivemind_trigger_subscriptions s ON s.id=e.subscription_id WHERE e.id=$1 AND e.org_id=$2`, row.event_id, row.org_id);
+  if (!event) return null;
+  const orgId = row.org_id, relevance = String(row.reason).replace(/^forward_/, '');
+  const facts = eventFacts(row.toolkit, row.trigger_slug, event.data, config);
+  const orgWide = (event.subject ?? null) === orgId;
+  const [directory, runtimeEnabled, watchRows, botRows] = await Promise.all([
+    loadCompanyDirectory(db, orgId), readRuntimeEnabled(db, orgId),
+    relevance === 'approved' ? db.$queryRawUnsafe('SELECT id,user_id,employee_id,toolkit,trigger_slug,filter,instruction FROM hivemind_employee_watches WHERE org_id=$1 AND toolkit=$2 AND trigger_slug=$3 AND enabled ORDER BY created_at LIMIT 100', orgId, row.toolkit, row.trigger_slug) : [],
+    facts.senderId ? db.digitalEmployee.findMany({ where: { orgId, slackBotUserId: { not: null } }, select: { slackBotUserId: true } }) : [],
+  ]);
+  const admins = orgWide && watchRows.length ? await loadAdminIds(db, orgId) : new Set();
+  const watches = watchRows.filter(watch => (orgWide ? admins.has(watch.user_id) : watch.user_id === row.user_id) && UUID.test(String(watch.employee_id)))
+    .map(watch => ({ id: String(watch.id), employeeId: String(watch.employee_id), toolkit: watch.toolkit, triggerSlug: watch.trigger_slug,
+      filter: Object.fromEntries(WATCH_FILTER_KEYS.flatMap(key => typeof watch.filter?.[key] === 'string' && watch.filter[key].trim() ? [[key, clip(watch.filter[key], 200)]] : [])),
+      instruction: clip(watch.instruction, 1000) }));
+  const occurred = event.occurred_at ? new Date(event.occurred_at) : null;
+  const received = event.received_at ? new Date(event.received_at) : null;
+  return {
+    version: 1, organizationId: orgId, userId: row.user_id, eventId: row.event_id, relevance, runtimeEnabled, orgWide,
+    receivedAt: received && Number.isFinite(received.getTime()) ? received.toISOString() : null,
+    event: {
+      toolkit: row.toolkit, triggerSlug: row.trigger_slug, title: clip(facts.title, 200), sender: clip(facts.senderRaw, 200),
+      text: String(facts.body).slice(0, 12_000), mentionText: String(facts.mentionText).slice(0, 12_000),
+      labels: facts.labels.slice(0, 16).map(label => label.slice(0, 80)), repository: clip(facts.repository, 140),
+      occurredAt: occurred && Number.isFinite(occurred.getTime()) ? occurred.toISOString() : null,
+      signal: attentionSignal({ toolkit: row.toolkit, data: event.data, decision: event.relevance_decision ?? undefined }),
+    },
+    sender: { status: senderStatus(facts, directory, config), bot: facts.bot, marked: facts.marked,
+      isEmployee: Boolean(facts.senderId) && botRows.some(item => lower(item.slackBotUserId) === facts.senderId),
+      keys: [...new Set([facts.senderEmail, facts.senderLogin, facts.senderId, lower(facts.senderRaw)].filter(Boolean))].map(key => key.slice(0, 200)) },
+    watches,
+  };
+}
+
+/**
+ * Sends every due forwarded row to OpenDot, one request per event, with the same retry as wakes: temporary failures back off
+ * (1, 2, 4 ... up to 15 minutes) until maxAttempts, a permanent refusal is final. On success the row is `forwarded`, its skip
+ * reason holds OpenDot's outcome, and watches OpenDot woke get their last fired time.
+ * @param {object} db Prisma client.
+ * @param {Date} now Clock.
+ * @param {object} config Routing limits.
+ * @param {object} deps `forward` for tests.
+ * @returns {Promise<{forwarded:number,forwardFailed:number}>} Counts for this sweep.
+ */
+export async function flushForwardedEvents(db, now, config, deps = {}) {
+  const out = { forwarded: 0, forwardFailed: 0 };
+  const rows = await db.$queryRawUnsafe(`UPDATE hivemind_employee_event_deliveries SET status='forwarding',claimed_at=now(),attempts=attempts+1
+    WHERE id IN (SELECT id FROM hivemind_employee_event_deliveries WHERE employee_id=$1
+      AND ((status='forward_pending' AND (retry_at IS NULL OR retry_at <= $2::timestamptz)) OR (status='forwarding' AND claimed_at < $3::timestamptz))
+      ORDER BY created_at LIMIT 32 FOR UPDATE SKIP LOCKED) RETURNING *`,
+  FORWARDED, now.toISOString(), new Date(now.getTime() - 5 * 60_000).toISOString());
+  const finish = (row, status, reason, error) => db.$executeRawUnsafe(
+    `UPDATE hivemind_employee_event_deliveries SET status=$2,skip_reason=$3,last_error=$4,delivered_at=CASE WHEN $2='forwarded' THEN now() ELSE delivered_at END WHERE id = ANY($1::uuid[])`,
+    [row.id], status, reason ?? null, error ?? null);
+  for (const row of rows) {
+    try {
+      const request = await forwardRequest(db, row, config);
+      if (!request) { await finish(row, 'skipped', 'event_unavailable'); continue; }
+      const receipt = await (deps.forward ?? dispatchOpenDotRoutedEvent)(request);
+      await finish(row, 'forwarded', clip(receipt?.outcome, 40) || null);
+      const fired = (Array.isArray(receipt?.targets) ? receipt.targets : []).filter(target => target?.wake === 'admitted')
+        .flatMap(target => (Array.isArray(target.watchIds) ? target.watchIds : [])).filter(id => UUID.test(String(id)));
+      if (fired.length) await db.$executeRawUnsafe('UPDATE hivemind_employee_watches SET last_fired_at=now(),last_error=NULL,updated_at=now() WHERE id = ANY($1::uuid[]) AND org_id=$2', [...new Set(fired)], row.org_id);
+      out.forwarded += 1;
+    } catch (error) {
+      const code = clip(error?.message, 120) || 'forward_failed';
+      if (permanent(error)) await finish(row, 'skipped', code, code);
+      else if (row.attempts >= config.maxAttempts) { await finish(row, 'failed', 'forward_failed', code); out.forwardFailed += 1; }
+      else {
+        const retryAt = new Date(now.getTime() + Math.min(60_000 * 2 ** (row.attempts - 1), 900_000)).toISOString();
+        await db.$executeRawUnsafe("UPDATE hivemind_employee_event_deliveries SET status='forward_pending',last_error=$2,retry_at=$3::timestamptz WHERE id = ANY($1::uuid[])", [row.id], code, retryAt);
+      }
     }
   }
   return out;

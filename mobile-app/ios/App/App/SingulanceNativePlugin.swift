@@ -545,6 +545,8 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
     private var loadedURL: URL?
     private var silent = false
     private let webView: WKWebView
+    /// Slide-in-from-the-right presentation shared by the open, close and edge-swipe paths.
+    private let transition = RoomSlideTransition()
     private static let storePrefix = "singulance-room:"
     /// Identifier of the persistent room store of one scope (UUID from a SHA-256 of the scope).
     private static func storeIdentifier(_ scope: String) -> UUID {
@@ -584,6 +586,8 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     override func viewDidLoad() {
         super.viewDidLoad()
+        modalPresentationStyle = .fullScreen
+        transitioningDelegate = transition
         view.backgroundColor = UIColor(red: 0.98, green: 0.976, blue: 0.957, alpha: 1)
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -604,8 +608,31 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
         edge.accessibilityLabel = "room-edge-back"
         view.addGestureRecognizer(edge)
     }
+    /// Left-edge swipe: the room follows the finger back to the right and completes past 35 % or on a fast flick, otherwise it springs back.
     @objc private func edgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
-        if gesture.state == .ended, gesture.translation(in: view).x > 60 { finish() }
+        let width = max(view.bounds.width, 1)
+        let progress = min(max(gesture.translation(in: view).x / width, 0), 1)
+        switch gesture.state {
+        case .began:
+            guard presentingViewController != nil, !isBeingDismissed else { return }
+            let driver = UIPercentDrivenInteractiveTransition()
+            driver.completionCurve = .easeOut
+            transition.interaction = driver
+            dismiss(animated: true)
+            transitionCoordinator?.animate(alongsideTransition: nil) { [weak self] context in
+                guard let self = self else { return }
+                self.transition.interaction = nil
+                if !context.isCancelled { self.webView.stopLoading(); self.onClose() }
+            }
+        case .changed:
+            transition.interaction?.update(progress)
+        case .ended:
+            let velocity = gesture.velocity(in: view).x
+            if progress > 0.35 || velocity > 800 { transition.interaction?.finish() } else { transition.interaction?.cancel() }
+        case .cancelled, .failed:
+            transition.interaction?.cancel()
+        default: break
+        }
     }
     /// The session could not be established: close the room and report it closed.
     func closeAfterFailure() { finish() }
@@ -657,6 +684,89 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
         decisionHandler(.allow)
     }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
+}
+/// Pushes a room in from the right like a navigation push: the presenting view shifts left by 30 % under a dimming
+/// layer and the room carries a soft shadow. Dismissal reverses it, and the left-edge swipe drives it interactively.
+/// With Reduce Motion on, both directions cross-fade instead.
+private final class RoomSlideTransition: NSObject, UIViewControllerTransitioningDelegate {
+    /// Set while the left-edge swipe drives the dismissal.
+    var interaction: UIPercentDrivenInteractiveTransition?
+    func animationController(forPresented presented: UIViewController, presenting: UIViewController, source: UIViewController) -> UIViewControllerAnimatedTransitioning? { Animator(presenting: true) }
+    func animationController(forDismissed dismissed: UIViewController) -> UIViewControllerAnimatedTransitioning? { Animator(presenting: false) }
+    func interactionControllerForDismissal(using animator: UIViewControllerAnimatedTransitioning) -> UIViewControllerInteractiveTransitioning? { interaction }
+
+    private final class Animator: NSObject, UIViewControllerAnimatedTransitioning {
+        let presenting: Bool
+        init(presenting: Bool) { self.presenting = presenting }
+        func transitionDuration(using transitionContext: UIViewControllerContextTransitioning?) -> TimeInterval { 0.35 }
+        func animateTransition(using context: UIViewControllerContextTransitioning) {
+            guard let from = context.viewController(forKey: .from), let to = context.viewController(forKey: .to) else { context.completeTransition(false); return }
+            let container = context.containerView
+            let duration = transitionDuration(using: context)
+            let width = container.bounds.width
+            let room = presenting ? to.view! : from.view!
+            let other = presenting ? from.view! : to.view!
+            let interactive = context.isInteractive
+            func finish() { context.completeTransition(!context.transitionWasCancelled) }
+
+            if UIAccessibility.isReduceMotionEnabled {
+                room.frame = container.bounds
+                if presenting { container.addSubview(room); room.alpha = 0 } else { container.insertSubview(other, belowSubview: room) }
+                UIView.animate(withDuration: 0.2, delay: 0, options: [.curveLinear], animations: { room.alpha = self.presenting ? 1 : 0 }) { _ in
+                    room.alpha = 1
+                    if !self.presenting && context.transitionWasCancelled { other.removeFromSuperview() }
+                    finish()
+                }
+                return
+            }
+
+            let dim = UIView(frame: container.bounds)
+            dim.backgroundColor = UIColor.black.withAlphaComponent(0.18)
+            dim.isUserInteractionEnabled = false
+            room.frame = container.bounds
+            other.frame = container.bounds
+            room.layer.shadowColor = UIColor.black.cgColor
+            room.layer.shadowOpacity = 0.22
+            room.layer.shadowRadius = 14
+            room.layer.shadowOffset = CGSize(width: -4, height: 0)
+            let shift = -width * 0.3
+            if presenting {
+                container.addSubview(room)
+                room.transform = CGAffineTransform(translationX: width, y: 0)
+                dim.alpha = 0
+            } else {
+                container.insertSubview(other, belowSubview: room)
+                other.transform = CGAffineTransform(translationX: shift, y: 0)
+                dim.alpha = 1
+            }
+            container.insertSubview(dim, aboveSubview: other)
+            let animations = {
+                if self.presenting {
+                    room.transform = .identity
+                    other.transform = CGAffineTransform(translationX: shift, y: 0)
+                    dim.alpha = 1
+                } else {
+                    room.transform = CGAffineTransform(translationX: width, y: 0)
+                    other.transform = .identity
+                    dim.alpha = 0
+                }
+            }
+            let completion: (Bool) -> Void = { _ in
+                room.layer.shadowOpacity = 0
+                room.transform = .identity
+                other.transform = .identity
+                dim.removeFromSuperview()
+                if !self.presenting && context.transitionWasCancelled { other.removeFromSuperview() }
+                finish()
+            }
+            if interactive {
+                // The percent-driven transition scrubs a linear timeline; the release continues with its own easing.
+                UIView.animate(withDuration: duration, delay: 0, options: [.curveLinear], animations: animations, completion: completion)
+            } else {
+                UIView.animate(withDuration: duration, delay: 0, usingSpringWithDamping: 0.92, initialSpringVelocity: 0.2, options: [], animations: animations, completion: completion)
+            }
+        }
+    }
 }
 /// Holds the room weakly so the web view's message handler does not keep the closed room alive.
 private final class WeakRoomMessages: NSObject, WKScriptMessageHandler {

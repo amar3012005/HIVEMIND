@@ -24,25 +24,45 @@ function createRoomManager({ electron, getWindow, onClosed }) {
     await ses().cookies.set(cookie.domain ? { ...base, domain: `.${cookie.domain}` } : base);
   }
 
-  async function open(url, cookie) {
-    const win = getWindow();
-    if (!win || win.isDestroyed()) throw new Error('no window');
-    await setCookie(cookie);
+  let winHooked = null;
+
+  function ensureView(win) {
     if (!view) {
       view = new WebContentsView({ webPreferences: { partition: PARTITION, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true } });
       const wc = view.webContents;
       wc.setWindowOpenHandler(() => ({ action: 'deny' }));
-      const guard = (event, target) => { if (!policy.isRoomNavigationAllowed(target)) event.preventDefault(); };
+      const guard = (event, target) => { if (target !== 'about:blank' && !policy.isRoomNavigationAllowed(target)) event.preventDefault(); };
       wc.on('will-navigate', guard);
       wc.on('will-redirect', guard);
       wc.on('will-frame-navigate', guard);
       ses().setPermissionRequestHandler((_wc, _permission, cb) => cb(false));
       ses().setPermissionCheckHandler(() => false);
+      view.setVisible(false);
       win.contentView.addChildView(view);
-      win.on('resize', layout);
-      win.on('closed', () => { view = null; });
     }
+    if (winHooked !== win) {
+      winHooked = win;
+      win.on('resize', layout);
+      win.on('closed', () => { view = null; winHooked = null; });
+    }
+  }
+
+  /** Creates the isolated room view hidden, so its renderer is already running when the first room opens. */
+  async function prewarm() {
+    const win = getWindow();
+    if (!win || win.isDestroyed() || view) return;
+    ensureView(win);
     layout();
+    try { await view.webContents.loadURL('about:blank'); } catch { /* prewarm is best effort; open() loads the room itself */ }
+  }
+
+  async function open(url, cookie) {
+    const win = getWindow();
+    if (!win || win.isDestroyed()) throw new Error('no window');
+    await setCookie(cookie);
+    ensureView(win);
+    layout();
+    view.setVisible(true);
     await view.webContents.loadURL(url);
     view.webContents.focus();
   }
@@ -50,15 +70,15 @@ function createRoomManager({ electron, getWindow, onClosed }) {
   function close({ silent = false } = {}) {
     const win = getWindow();
     if (!view) return;
-    const v = view; view = null;
+    const v = view; const wasOpen = v.getVisible(); view = null;
     try { if (win && !win.isDestroyed()) win.contentView.removeChildView(v); } catch { /* window already tearing down */ }
     try { v.webContents.close(); } catch { /* already destroyed */ }
     ses().clearStorageData().catch(() => {});
     ses().clearCache().catch(() => {});
-    if (!silent) onClosed();
+    if (!silent) { if (wasOpen) onClosed(); setTimeout(() => { prewarm().catch(() => {}); }, 500); }
   }
 
-  return { open, close, isOpen: () => view !== null };
+  return { open, close, prewarm, isOpen: () => view !== null && view.getVisible() };
 }
 
 module.exports = { createRoomManager, PARTITION };

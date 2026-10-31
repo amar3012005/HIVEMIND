@@ -7,7 +7,8 @@ const fs = require('fs');
 const notch = require('./notch');
 const { TokenStore } = require('./native/token-store');
 const { createBridge, registerBridge } = require('./native/bridge');
-const { createRoomManager } = require('./native/room');
+const { createRoomManager, PARTITION: ROOM_PARTITION } = require('./native/room');
+const { createScreens } = require('./native/screens');
 const { createNotifier } = require('./native/notifier');
 const { parseDeepLink, isTrustedSender } = require('./native/policy');
 
@@ -133,6 +134,7 @@ function createSplash() {
 
 // ── Window creation ───────────────────────────────────────────
 function createWindow() {
+  screens.activate(); // a version downloaded since the last window becomes active here
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -172,6 +174,8 @@ function createWindow() {
   ipcMain.handle('retry-connect', () => { if (mainWindow) mainWindow.loadURL(APP_URL); });
 
   mainWindow.webContents.on('dom-ready', flushDeepLink);
+  // Prewarm the isolated room view once the app has painted, so the first room opens warm.
+  mainWindow.webContents.once('dom-ready', () => setTimeout(() => { rooms.prewarm().catch(() => {}); }, 1500));
   mainWindow.on('focus', notifyForeground);
   mainWindow.on('show', notifyForeground);
 
@@ -488,6 +492,8 @@ const rooms = createRoomManager({
   getWindow: () => mainWindow,
   onClosed: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('native:room-closed'); },
 });
+// On-device screens (W5): same-origin interceptor so cookies keep working; see native/screens.js.
+const screens = createScreens({ electron, userDataDir: app.getPath('userData'), log: (...a) => log.info('[screens]', ...a) });
 const notifier = createNotifier({
   Notification,
   onClick: (target, id) => {
@@ -512,6 +518,7 @@ const bridge = createBridge({
   },
   onSignOut: async () => {
     rooms.close({ silent: true });
+    screens.clear();
     await session.fromPartition('singulance-runner').clearStorageData().catch(() => {});
   },
 });
@@ -536,6 +543,9 @@ ipcMain.handle('launch-app', () => {
 });
 
 app.whenReady().then(() => {
+  screens.install(session.defaultSession);
+  screens.install(session.fromPartition(ROOM_PARTITION));
+  screens.start();
   // Cinematic B&W signature intro on every open, then the workspace.
   createSplash();
   // Windows/Linux cold start by link: the URL arrives in argv of the first process.

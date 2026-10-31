@@ -18,6 +18,10 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.webkit.WebMessageCompat;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
+import org.json.JSONObject;
 import java.lang.ref.WeakReference;
 
 /**
@@ -86,6 +90,19 @@ public class RoomActivity extends AppCompatActivity {
                 return !RoomPolicy.allowsNavigation(request.getUrl().toString());
             }
         });
+        // Room pages may ask for a haptic with a JSON string {type:"hivemind.open-dot.haptic",version:1,kind}; only the
+        // fixed room origins and the main frame are accepted, and nothing is sent back. This is not a JavaScript interface.
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            java.util.Set<String> origins = new java.util.HashSet<>();
+            for (String host : RoomPolicy.ALLOWED_HOSTS) origins.add("https://" + host);
+            WebViewCompat.addWebMessageListener(webView, "hivemindRoom", origins, (view, message, sourceOrigin, isMainFrame, replyProxy) -> {
+                if (!isMainFrame || message.getType() != WebMessageCompat.TYPE_STRING || message.getData() == null) return;
+                try {
+                    JSONObject body = new JSONObject(message.getData());
+                    if (body.optInt("version") == 1 && "hivemind.open-dot.haptic".equals(body.optString("type"))) Haptics.play(view, body.optString("kind"));
+                } catch (Exception ignored) { /* Malformed page message: only JSON parsing can throw here and it is dropped. */ }
+            });
+        }
         root.addView(webView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         setContentView(root);
         // Edge-to-edge: keep Done and the page clear of the system bars and the keyboard.

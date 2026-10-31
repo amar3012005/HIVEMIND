@@ -165,6 +165,18 @@ public class SingulanceNativePlugin extends Plugin {
             getActivity().runOnUiThread(() -> RoomActivity.open(getActivity(), url, cookie.toString(), () -> notifyListeners("roomClosed", new JSObject()), call::resolve));
         } catch (Exception ignored) { call.reject("Room could not open."); } });
     }
+    @PluginMethod public void haptic(PluginCall call) {
+        final String kind = call.getString("kind");
+        try { requireTrusted(); if (!Haptics.allows(kind)) throw new IllegalArgumentException(); } catch (Exception ignored) { call.reject("Haptic is not allowed."); return; }
+        getActivity().runOnUiThread(() -> { Haptics.play(getBridge().getWebView(), kind); call.resolve(); });
+    }
+    @PluginMethod public void openSettings(PluginCall call) {
+        try { requireTrusted(); } catch (Exception ignored) { call.reject("Settings could not open."); return; }
+        getActivity().runOnUiThread(() -> { try {
+            getActivity().startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.fromParts("package", getContext().getPackageName(), null)));
+            call.resolve();
+        } catch (Exception ignored) { call.reject("Settings could not open."); } });
+    }
     @PluginMethod public void closeRoom(PluginCall call) {
         try { requireTrusted(); } catch (Exception ignored) { call.reject("Room could not close."); return; }
         getActivity().runOnUiThread(() -> { RoomActivity.closeSilently(); call.resolve(); });

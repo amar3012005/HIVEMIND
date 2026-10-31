@@ -20,6 +20,10 @@ export interface SingulanceNative {
   /** iOS and Android: opens `/employees/<uuid>` of the OpenDot Runtime host full screen in an isolated web view signed in with the stored session. */
   openRoom(options: {path: string}): Promise<void>;
   closeRoom(): Promise<void>;
+  /** Plays system haptic feedback; rejects for any other kind. Android maps kinds to the closest predefined effect and honours the system touch-feedback setting. */
+  haptic(options: {kind: 'light' | 'soft' | 'warning' | 'success' | 'selection' | 'error'}): Promise<void>;
+  /** Opens this app's page in the system Settings. */
+  openSettings(): Promise<void>;
   addListener(event: 'roomClosed', listener: () => void): Promise<{remove():Promise<void>}>;
   /** User-initiated OS document picker. No filesystem path/URI accepted. Max 20 MiB. */
   saveFile(options: {name: string; mimeType: string; dataBase64: string}): Promise<{saved:boolean}>;

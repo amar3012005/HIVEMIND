@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseAddress, registrableDomain, loadCompanyDirectory as loadDir, routeEventGuarded, senderStatus, stripQuoted, eventFacts, mentionedEmployees, internalSender, watchMatches, decideRouting, routingConfig, routeApprovedEvent, flushEmployeeWakes, wakeIdFor, EVENT_LEVEL } from '../../src/connectors/employee-event-routing.js';
+import { fakeNotifyDb } from './fake-notify-db.js';
 import { runEventWatch, watchKey } from '../../src/connectors/employee-event-watches.js';
 
 const ORG = '11111111-1111-4111-8111-111111111111';
@@ -727,4 +728,18 @@ test('every delivered wake carries the attention signal: evidence, provider ids,
   assert.equal(signal.providerRef.message_id, 'msg-7'); assert.equal(signal.providerRef.thread_id, 'thr-7');
   assert.equal(signal.signal.app, 'gmail'); assert.equal(signal.signal.subject, '@leo task 7');
   assert.deepEqual(signal.appTools, { toolkit: 'gmail', slugs: ['GMAIL_FETCH_MESSAGE_BY_THREAD_ID', 'GMAIL_CREATE_EMAIL_DRAFT', 'GMAIL_ADD_LABEL_TO_EMAIL', 'GMAIL_REPLY_TO_THREAD'] });
+});
+
+test('bell: a delivered wake notifies the employee\'s owner once, with the merged event count; a failed delivery notifies nobody', async () => {
+  const { db, store } = fakeDb();
+  const bell = fakeNotifyDb({ employees: [{ id: LEO, orgId: ORG, name: 'Leo', createdBy: USER, archivedAt: null }], members: [[USER, ORG]] });
+  db.workspaceNotification = bell.db.workspaceNotification;
+  db.digitalEmployee.findFirst = bell.db.digitalEmployee.findFirst;
+  const t0 = Date.parse('2026-10-29T10:00:00Z');
+  await mention(1, db, store, t0); await mention(2, db, store, t0 + 30_000);
+  await flushEmployeeWakes(db, { config: on, now: t0 + 125_000, deliver: async () => { throw Object.assign(new Error('unavailable'), { status: 503 }); } });
+  assert.equal(bell.rows.length, 0);
+  await flushEmployeeWakes(db, { config: on, now: t0 + 300_000, deliver: async () => ({ accepted: true }) });
+  assert.equal(bell.rows.length, 1);
+  assert.deepEqual([bell.rows[0].userId, bell.rows[0].title, bell.rows[0].dedupeKey, bell.rows[0].data.eventCount], [USER, 'Gmail → Leo: 2 events', `employee-wake:${wakeIdFor(LEO, ['ev1', 'ev2'])}`, 2]);
 });

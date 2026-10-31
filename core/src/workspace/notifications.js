@@ -25,6 +25,7 @@ export async function createWorkspaceNotification(prisma, input) {
   return prisma.workspaceNotification.upsert({
     where: { orgId_userId_dedupeKey: { orgId: create.orgId, userId: create.userId, dedupeKey: create.dedupeKey } },
     create,
-    update: { title: create.title, body: create.body, data: create.data, readAt: null, createdAt: new Date() },
+    // `once` keeps a notification that already exists exactly as it is: a retry never marks it unread or moves it to the top again.
+    update: input.once === true ? {} : { title: create.title, body: create.body, data: create.data, readAt: null, createdAt: new Date() },
   });
 }

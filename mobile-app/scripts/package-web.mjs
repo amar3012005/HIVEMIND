@@ -9,6 +9,11 @@ if (!/<script[^>]+src=/i.test(html)) throw Error('The frontend must contain its 
 for (const entry of await readdir(target)) if (!['offline.html', '.gitkeep'].includes(entry)) await rm(resolve(target, entry), { recursive: true, force: true });
 await cp(source, target, { recursive: true });
 // Capacitor must load a real index file; initialize the SPA route before React loads.
-await writeFile(resolve(target, 'index.html'), html.replace('<head>', '<head><script>if(location.pathname === "/" || location.pathname === "/index.html") history.replaceState(null, "", "/hivemind/m/chat");</script>'));
+// Remote web fonts must not block the first paint of a packaged app (offline, or a slow route to the font host):
+// the stylesheet loads in the background and the system fonts render until it arrives.
+const packaged = html
+  .replace('<head>', '<head><script>if(location.pathname === "/" || location.pathname === "/index.html") history.replaceState(null, "", "/hivemind/m/chat");</script>')
+  .replace(/<link (href="https:\/\/fonts\.googleapis\.com\/[^"]+") rel="stylesheet">/g, '<link $1 rel="stylesheet" media="print" onload="this.media=\'all\'">');
+await writeFile(resolve(target, 'index.html'), packaged);
 await writeFile(resolve(target, 'mobile-build.json'), JSON.stringify({ format: 1, frontendSha: process.env.SINGULANCE_FRONTEND_SHA || null, builtAt: new Date().toISOString() }) + '\n');
 console.log('Packaged frontend assets. Native authentication and device checks remain required.');

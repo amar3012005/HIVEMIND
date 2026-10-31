@@ -4,12 +4,13 @@ import Security
 import WebKit
 import Capacitor
 import AuthenticationServices
+import CryptoKit
 
 @objc(SingulanceNativePlugin)
 public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTaskDelegate, UIDocumentPickerDelegate, ASWebAuthenticationPresentationContextProviding {
     public let identifier = "SingulanceNativePlugin"
     public let jsName = "SingulanceNative"
-    public let pluginMethods: [CAPPluginMethod] = ["authenticate", "setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance", "workspaceAccess", "openRoom", "closeRoom"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
+    public let pluginMethods: [CAPPluginMethod] = ["authenticate", "setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance", "workspaceAccess", "openRoom", "closeRoom", "getPreference", "setPreference", "removePreference"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
     private var authenticationSession: ASWebAuthenticationSession?
     public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         return bridge!.viewController!.view.window!
@@ -38,6 +39,8 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
     private var streams: [String: URLSessionWebSocketTask] = [:]
     private let streamLock = NSLock()
     private let cookies = URLSessionConfiguration.ephemeral.httpCookieStorage
+    /// Runtime-host session cookies (set by its session admission), held in memory apart from the Brain runner's.
+    private let runtimeCookies = URLSessionConfiguration.ephemeral.httpCookieStorage
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = cookies
@@ -70,6 +73,34 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
             ])
         }
     }
+    /// Small non-secret settings that must survive a WebView data purge and an app reinstall (the Keychain keeps them).
+    private let preferenceKeys = ["privacyChoice"]
+    private func preferenceKey(_ call: CAPPluginCall) throws -> String {
+        guard trusted(), let key = call.getString("key"), preferenceKeys.contains(key) else { throw NativeError.denied }
+        return "preference." + key
+    }
+    @objc func getPreference(_ call: CAPPluginCall) {
+        do { let value = try read(preferenceKey(call)); call.resolve(["value": value as Any? ?? NSNull()]) }
+        catch { call.reject("Preference could not be read.") }
+    }
+    @objc func setPreference(_ call: CAPPluginCall) {
+        do {
+            let key = try preferenceKey(call)
+            guard let value = call.getString("value"), value.utf8.count <= 4096 else { throw NativeError.denied }
+            let q = query(key); SecItemDelete(q as CFDictionary)
+            var item = q; item[kSecValueData as String] = Data(value.utf8)
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw NativeError.denied }
+            call.resolve()
+        } catch { call.reject("Preference could not be stored.") }
+    }
+    @objc func removePreference(_ call: CAPPluginCall) {
+        do {
+            let status = SecItemDelete(query(try preferenceKey(call)) as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else { throw NativeError.denied }
+            call.resolve()
+        } catch { call.reject("Preference could not be removed.") }
+    }
     private func read(_ key: String) throws -> String? {
         var q = query(key); q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?; let status = SecItemCopyMatching(q as CFDictionary, &result)
@@ -101,19 +132,22 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
                 streamLock.lock(); let active = Array(streams.values); streams.removeAll(); streamLock.unlock()
                 for socket in active { socket.cancel(with: .goingAway, reason: nil) }
                 session.getAllTasks { tasks in for task in tasks { task.cancel() } }
+                controlSessionLock.lock(); controlSession = nil; controlSessionLock.unlock()
+                for cookie in runtimeCookies?.cookies ?? [] { runtimeCookies?.deleteCookie(cookie) }
+                DispatchQueue.main.async { self.room?.closeSilently(); self.room = nil; RoomViewController.removeStores(keeping: nil) }
             }
             call.resolve()
         } catch { call.reject("Credential could not be removed.") }
     }
     private func allowedURL(_ value: String?) throws -> URL {
         guard let value = value, let url = URL(string: value), url.scheme == "https", url.user == nil, url.password == nil, url.fragment == nil, url.port == nil || url.port == 443,
-              let host = url.host, ["api.singulancelabs.com", "next.singulancelabs.com"].contains(host),
+              let host = url.host, ["api.singulancelabs.com", "next.singulancelabs.com", "runtime-runner.singulancelabs.com"].contains(host),
               let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
               !path.contains("%"), !path.contains("\\"), !path.contains(".."), !path.contains("//"),
-              host == "api.singulancelabs.com" ? (path.hasPrefix("/auth/mobile/") || path == "/auth/session" || path == "/auth/email/config" || path.hasPrefix("/v1/")) : (path.hasPrefix("/api/") || path.hasPrefix("/plugins/") || path.hasPrefix("/assets/")) else { throw NativeError.denied }
+              host == "api.singulancelabs.com" ? (path.hasPrefix("/auth/mobile/") || path == "/auth/session" || path == "/auth/email/config" || path.hasPrefix("/v1/")) : host == "runtime-runner.singulancelabs.com" ? path.hasPrefix("/api/") : (path.hasPrefix("/api/") || path.hasPrefix("/plugins/") || path.hasPrefix("/assets/")) else { throw NativeError.denied }
         return url
     }
-    private func makeRequest(_ call: CAPPluginCall) throws -> URLRequest {
+    private func makeRequest(_ call: CAPPluginCall, controlSession: HTTPCookie? = nil) throws -> URLRequest {
         guard trusted() else { throw NativeError.denied }
         let url = try allowedURL(call.getString("url")); var request = URLRequest(url: url)
         let method = call.getString("method") ?? "GET"
@@ -133,6 +167,13 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
             let runnerCookies = cookies?.cookies(for: url) ?? []
             for (name, value) in HTTPCookie.requestHeaderFields(with: runnerCookies) { request.setValue(value, forHTTPHeaderField: name) }
         }
+        if url.host == roomHost {
+            // Runtime-host APIs (team, Needs you, Calendar, Library) authenticate Control's session cookie, as the room does.
+            guard let controlSession = controlSession else { throw NativeError.denied }
+            request.setValue("https://" + roomHost, forHTTPHeaderField: "Origin")
+            let admitted = (runtimeCookies?.cookies(for: url) ?? []).filter { $0.name != controlSession.name }
+            for (name, value) in HTTPCookie.requestHeaderFields(with: [controlSession] + admitted) { request.setValue(value, forHTTPHeaderField: name) }
+        }
         if let body = call.getString("body") {
             let encoding = call.getString("bodyEncoding") ?? "utf8"
             guard ["utf8", "base64"].contains(encoding), body.utf8.count <= 12 * 1024 * 1024 else { throw NativeError.denied }
@@ -147,9 +188,46 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
             if call.getBool("authorize") == true, try allowedURL(call.getString("url")).host == "api.singulancelabs.com", try read("cpToken") == nil {
                 call.resolve(["status": 401, "headers": [:], "data": "{\"error\":\"signed_out\"}"]); return
             }
-            let request = try makeRequest(call)
+            if try allowedURL(call.getString("url")).host == roomHost {
+                cachedControlCookie { cookie in
+                    guard let cookie = cookie else { call.resolve(["status": 401, "headers": [:], "data": "{\"error\":\"signed_out\"}"]); return }
+                    do { self.send(call, try self.makeRequest(call, controlSession: cookie)) } catch { call.reject("Native request is not allowed.") }
+                }
+                return
+            }
+            send(call, try makeRequest(call))
+        } catch { call.reject("Native request is not allowed.") }
+    }
+    /// Control's session cookie for Runtime-host requests, reused until shortly before it expires (at most ten minutes).
+    private var controlSession: (cookie: HTTPCookie, until: Date)?
+    private let controlSessionLock = NSLock()
+    private func cachedControlCookie(_ completion: @escaping (HTTPCookie?) -> Void) {
+        controlSessionLock.lock(); let cached = controlSession; controlSessionLock.unlock()
+        if let cached = cached, cached.until > Date() { completion(cached.cookie); return }
+        controlCookie { cookie in
+            if let cookie = cookie {
+                let limit = Date().addingTimeInterval(600)
+                let until = min(limit, cookie.expiresDate?.addingTimeInterval(-60) ?? limit)
+                self.controlSessionLock.lock(); self.controlSession = (cookie, until); self.controlSessionLock.unlock()
+            }
+            completion(cookie)
+        }
+    }
+    private func send(_ call: CAPPluginCall, _ request: URLRequest) {
+            #if DEBUG
+            let started = Date()
+            #endif
             session.dataTask(with: request) { data, response, error in
+                #if DEBUG
+                // Debug builds only: method, host, path, status and duration; never query strings, headers or bodies.
+                NSLog("[native-http] %@ %@%@ %d %dms", request.httpMethod ?? "GET", request.url?.host ?? "", request.url?.path ?? "", (response as? HTTPURLResponse)?.statusCode ?? -1, Int(Date().timeIntervalSince(started) * 1000))
+                #endif
                 guard error == nil, let response = response as? HTTPURLResponse, let data = data, data.count <= 20 * 1024 * 1024 else { call.reject("Native request failed."); return }
+                if let url = response.url, url.host == self.roomHost {
+                    var fields: [String: String] = [:]
+                    for (key, value) in response.allHeaderFields { if let key = key as? String, let value = value as? String { fields[key] = value } }
+                    for cookie in HTTPCookie.cookies(withResponseHeaderFields: fields, for: url) where cookie.domain == self.roomHost || cookie.domain == "." + self.roomHost { self.runtimeCookies?.setCookie(cookie) }
+                }
                 if let url = response.url, url.host == "next.singulancelabs.com" {
                     var fields: [String: String] = [:]
                     for (key, value) in response.allHeaderFields { if let key = key as? String, let value = value as? String { fields[key] = value } }
@@ -159,9 +237,11 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
                 for name in ["Content-Type", "Content-Length", "Content-Disposition", "Retry-After"] { if let value = response.value(forHTTPHeaderField: name) { headers[name.lowercased()] = value } }
                 let responseType = call.getString("responseType") ?? "text"
                 guard ["text", "base64"].contains(responseType) else { call.reject("Response type is invalid."); return }
+                if response.statusCode == 401, request.url?.host == self.roomHost {
+                    self.controlSessionLock.lock(); self.controlSession = nil; self.controlSessionLock.unlock()
+                }
                 call.resolve(["status": response.statusCode, "headers": headers, "encoding": responseType, "data": responseType == "base64" ? data.base64EncodedString() : (String(data: data, encoding: .utf8) ?? "")])
             }.resume()
-        } catch { call.reject("Native request is not allowed.") }
     }
     // OpenDot employee rooms are a separate web application (https://runtime-runner.singulancelabs.com) that
     // refuses to be framed by capacitor://localhost and authenticates a Control session cookie. The room
@@ -203,12 +283,14 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
         guard trusted(), let path = call.getString("path"),
               path.range(of: "^/employees/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", options: .regularExpression) != nil,
               let url = URL(string: "https://" + roomHost + path + "?embed=hivemind") else { call.reject("Room is not allowed."); return }
+        // The signed-in company and person; rooms of one scope share one persistent store, other scopes' stores are removed.
+        let scope = call.getString("scope").flatMap { $0.count <= 200 && !$0.isEmpty ? $0 : nil }
         controlCookie { cookie in
             DispatchQueue.main.async {
                 guard let cookie = cookie else { call.reject("Room could not open."); return }
                 if let open = self.room { open.show(url, cookie: cookie); call.resolve(); return }
                 guard let presenter = self.bridge?.viewController else { call.reject("Room could not open."); return }
-                let controller = RoomViewController(allowedHosts: [self.roomHost, "dots.singulancelabs.com"]) { [weak self] in
+                let controller = RoomViewController(allowedHosts: [self.roomHost, "dots.singulancelabs.com"], scope: scope) { [weak self] in
                     self?.room = nil
                     self?.notifyListeners("roomClosed", data: [:])
                 }
@@ -225,6 +307,23 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
             self.room = nil
             call.resolve()
         }
+    }
+    /// Product pages linked by absolute URL (Brain on next., rooms on the Runtime host) stay inside the app: the page
+    /// navigates to the same path at the packaged origin instead of Capacitor handing the URL to Safari.
+    private let productHosts: Set<String> = ["next.singulancelabs.com", "runtime-runner.singulancelabs.com", "singulancelabs.com", "www.singulancelabs.com"]
+    @objc public override func shouldOverrideLoad(_ navigationAction: WKNavigationAction) -> NSNumber? {
+        guard let url = navigationAction.request.url, url.scheme == "https", url.port == nil, url.user == nil,
+              let host = url.host, productHosts.contains(host), url.path.hasPrefix("/hivemind/"),
+              navigationAction.targetFrame == nil || navigationAction.targetFrame?.isMainFrame == true,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let target = components.percentEncodedPath.removingPercentEncoding,
+              !target.contains(".."), !target.contains("//") else { return nil }
+        let destination = components.percentEncodedPath + (components.percentEncodedQuery.map { "?" + $0 } ?? "")
+        guard let literal = try? String(data: JSONSerialization.data(withJSONObject: [destination], options: []), encoding: .utf8) else { return nil }
+        DispatchQueue.main.async {
+            self.bridge?.webView?.evaluateJavaScript("(function(p){if(window.__hmNativeNavigate){window.__hmNativeNavigate(p)}else{window.location.assign(p)}})(\(literal)[0])")
+        }
+        return true
     }
     public func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
     private func event(_ id: String, _ type: String, _ data: String? = nil) {
@@ -302,19 +401,43 @@ private class TrustedFrameHandler: NSObject, WKScriptMessageHandler {
     }
 }
 /// Full-screen host for one OpenDot room: isolated storage, https navigation limited to the room's own hosts, no new windows.
-private final class RoomViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
+private final class RoomViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     private let allowedHosts: [String]
     private let onClose: () -> Void
     private var silent = false
     private let webView: WKWebView
-    init(allowedHosts: [String], onClose: @escaping () -> Void) {
+    private static let storePrefix = "singulance-room:"
+    /// Identifier of the persistent room store of one scope (UUID from a SHA-256 of the scope).
+    private static func storeIdentifier(_ scope: String) -> UUID {
+        var bytes = Array(SHA256.hash(data: Data((storePrefix + scope).utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x50; bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
+    /// Removes every persistent room store except the one of `scope` (all of them when nil): sign-out and company switch.
+    static func removeStores(keeping scope: String?) {
+        guard #available(iOS 17.0, *) else { return }
+        let keep = scope.map(storeIdentifier)
+        WKWebsiteDataStore.fetchAllDataStoreIdentifiers { identifiers in
+            for identifier in identifiers where identifier != keep { WKWebsiteDataStore.remove(forIdentifier: identifier) { _ in } }
+        }
+    }
+    init(allowedHosts: [String], scope: String?, onClose: @escaping () -> Void) {
         self.allowedHosts = allowedHosts
         self.onClose = onClose
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
+        // One persistent store per company and person keeps the room's own history cache (OpenDot IndexedDB) between
+        // openings. Without a scope, or before iOS 17, the room uses a store that is discarded when it closes.
+        if #available(iOS 17.0, *), let scope = scope {
+            RoomViewController.removeStores(keeping: scope)
+            configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: RoomViewController.storeIdentifier(scope))
+        } else {
+            configuration.websiteDataStore = .nonPersistent()
+        }
         configuration.allowsInlineMediaPlayback = true
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(nibName: nil, bundle: nil)
+        // The room's own back control ("Back to your team") posts here because the room is not framed by HIVEMIND.
+        configuration.userContentController.add(WeakRoomMessages(self), name: "hivemindRoom")
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     override func viewDidLoad() {
@@ -345,8 +468,18 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
         loadViewIfNeeded()
         webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) { self.webView.load(URLRequest(url: url)) }
     }
-    func closeSilently() { silent = true; webView.stopLoading(); dismiss(animated: true) }
-    @objc private func finish() { webView.stopLoading(); dismiss(animated: true) { self.onClose() } }
+    /// The Control session cookie is a credential: it never stays in the persistent store after the room closes.
+    private func forgetSession() {
+        let store = webView.configuration.websiteDataStore.httpCookieStore
+        store.getAllCookies { cookies in for cookie in cookies where cookie.name == "hm_cp_session" { store.delete(cookie) } }
+    }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame, let host = message.frameInfo.request.url?.host, allowedHosts.contains(host),
+              let body = message.body as? [String: Any], body["version"] as? Int == 1, body["type"] as? String == "hivemind.open-dot.back" else { return }
+        finish()
+    }
+    func closeSilently() { silent = true; webView.stopLoading(); forgetSession(); dismiss(animated: true) }
+    @objc private func finish() { webView.stopLoading(); forgetSession(); dismiss(animated: true) { self.onClose() } }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
         let allowed = url.scheme == "about" || (url.scheme == "https" && url.port == nil && allowedHosts.contains(url.host ?? ""))
@@ -354,9 +487,17 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
     }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
 }
+/// Holds the room weakly so the web view's message handler does not keep the closed room alive.
+private final class WeakRoomMessages: NSObject, WKScriptMessageHandler {
+    private weak var room: RoomViewController?
+    init(_ room: RoomViewController) { self.room = room }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) { room?.userContentController(userContentController, didReceive: message) }
+}
 class SingulanceViewController: CAPBridgeViewController {
     override func capacitorDidLoad() {
         bridge?.registerPluginInstance(SingulanceNativePlugin())
+        // Edge swipe goes back through the page history, as Safari does on a phone.
+        bridge?.webView?.allowsBackForwardNavigationGestures = true
         // The stock WK script handler can be addressed by iframes even though its
         // helper script is main-frame-only. Filter the native message boundary itself.
         if let capBridge = bridge as? CapacitorBridge, let controller = bridge?.webView?.configuration.userContentController {

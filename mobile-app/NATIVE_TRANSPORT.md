@@ -23,6 +23,11 @@ stored using setCredential. Its lifetime/revocation remain server-owned.
 - HTTPS only, exact `api.singulancelabs.com` or `next.singulancelabs.com`.
 - Core paths: `/auth/mobile/*` and `/v1/*`.
 - Runner paths: `/api/*`; static `/plugins/*` and `/assets/*` are GET/HEAD only.
+- Runtime host (`runtime-runner.singulancelabs.com`): `/api/*` only. The plugin attaches Control's `hm_cp_session`
+  cookie (read from `GET /auth/session` with the stored bearer, cached in memory for at most ten minutes and dropped on
+  a 401) plus the Runtime host's own session cookies from a separate memory jar, and sets
+  `Origin: https://runtime-runner.singulancelabs.com`. This is the credential the employee room web view already uses;
+  it never reaches JavaScript. Signing out clears both.
 - Userinfo, fragments, nonstandard ports, encoded traversal and arbitrary hosts
   are rejected. HTTP redirects are never followed.
 - Caller headers: Accept and Content-Type only. Authorization, Cookie, Host and
@@ -48,6 +53,18 @@ picker. iOS uses a protected temporary file and deletes it after the export or
 cancellation. No broad storage permission is requested. The decoded file cap is
 20 MiB and cancellation returns `{saved:false}`. Frontend download actions must
 invoke this method instead of relying on WebView Blob-download anchors.
+
+## Navigation, preferences and rooms
+
+- A main-frame navigation to `/hivemind/*` on `next.`, the Runtime host or the company site stays in the app: the plugin
+  cancels it and asks the page to route to the same path (`window.__hmNativeNavigate`). Other external links keep
+  Capacitor's default and open outside the app.
+- `getPreference` / `setPreference` / `removePreference` keep only `privacyChoice` in the Keychain, so the cookie choice
+  survives a reinstall.
+- Rooms: see `openRoom` in `src/native-bridge.d.ts`. The room's own back control posts `hivemind.open-dot.back` to the
+  `hivemindRoom` message handler (main frame of an allowed room host only), which closes the room like Done.
+- Debug builds log each native request as method, host, path, status and duration (`[native-http]`), never query
+  strings, headers or bodies. Release builds log nothing.
 
 ## DSH streaming
 

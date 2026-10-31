@@ -95,6 +95,14 @@ export class EmployeeStore {
     });
   }
 
+  /** Public fields of these employees of the organization, in no particular order; unknown or foreign ids are absent. */
+  async listByIds({ orgId, ids }) {
+    return this.prisma.digitalEmployee.findMany({
+      where: { orgId, id: { in: ids } },
+      select: PUBLIC_FIELDS,
+    });
+  }
+
   async getById({ id, orgId }) {
     return this.prisma.digitalEmployee.findFirst({
       where: { id, orgId },

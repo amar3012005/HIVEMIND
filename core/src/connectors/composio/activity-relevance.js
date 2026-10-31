@@ -141,6 +141,10 @@ export function classifyPendingActivity(ctx) {
         } else {
           const context=await companyContext(ctx);
           receipt = await (ctx.relevanceDecider || decideActivityRelevance)({ event: { ...row, toolkit: sub[0].toolkit }, context });
+          // Runtime off and the company sees every event: the classifier's verdict is kept for the record, nothing is rejected.
+          if (!runtimeOn && receipt.status === 'rejected' && routing.deliverAllOrgs?.has(String(ctx.orgId).toLowerCase())) {
+            receipt = { ...receipt, status: 'approved', deliveredAll: true, classifierStatus: 'rejected' };
+          }
           // Runtime off: the same attention step also picks the employee whose role or recent work owns the event. A near miss
           // (useful company work below the approval confidence) is promoted only when an employee clearly owns it.
           if (routing.enabled && !forwarded && !runtimeOn && (receipt.status === 'approved' || receipt.nearMiss === true)) {

@@ -188,6 +188,10 @@ function senderEvidence(d, message, address, config) {
   const domain = address.split('@')[1];
   if (!domain) return { verified: false };
   if (d.sender_verified === true || message.sender_verified === true) return { verified: true };
+  // Gmail labels SENT only on mail the connected mailbox itself sent (a forward or note to self), which carries no
+  // Authentication-Results header; the mailbox owner wrote it. Whether the address counts as inside is still decided by senderStatus.
+  const labels = Array.isArray(d.label_ids) ? d.label_ids : Array.isArray(d.labelIds) ? d.labelIds : [];
+  if (labels.includes('SENT')) return { verified: true };
   const header = headerValue(d, message, 'authentication-results') ?? (typeof d.authentication_results === 'string' ? d.authentication_results : undefined);
   if (!header) return { verified: false };
   const segments = header.replace(/\([^)]*\)/gu, ' ').split(';').map(item => item.trim()).filter(Boolean);

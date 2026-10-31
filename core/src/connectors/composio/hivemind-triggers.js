@@ -220,7 +220,16 @@ async function receiveTriggerEventOnce(raw, headers, db) {
     catch (error) { if (error.status === 403) { noteIntake('account_forbidden', row.slug); continue; } throw error; }
     if (!active.some(a => a.id === row.account_id)) { noteIntake('account_inactive', row.slug); continue; }
     const check = ajv.compile(row.payload_schema);
-    if (!check(payload.data)) fail('Event does not match the subscribed schema.', 422);
+    if (!check(payload.data)) {
+      // Composio changes payload types between trigger versions (a field that is now null or a list). A top-level optional field of the
+      // wrong type is dropped and the event kept; anything else still fails. Only the slug and the failing field paths are logged.
+      const paths = (check.errors ?? []).map(error => String(error.instancePath || error.params?.missingProperty || '')).slice(0, 8);
+      console.warn('[composio-webhook] schema mismatch', JSON.stringify({ slug: row.slug, paths, keywords: [...new Set((check.errors ?? []).map(error => error.keyword))].slice(0, 6) }));
+      const repaired = withoutMistypedOptionalFields(payload.data, row.payload_schema, check.errors ?? []);
+      if (!repaired || !check(repaired)) fail('Event does not match the subscribed schema.', 422);
+      payload.data = repaired;
+      noteIntake('schema_repaired', row.slug);
+    }
     const eventId = attentionEventIdentity(row.toolkit,payload.data,row.org_id,row.user_id,`${payload.id || m.log_id || id}:${row.id}`);
     const duplicate = await db.$queryRawUnsafe('SELECT id FROM hivemind_trigger_events WHERE id=$1', eventId);
     if (duplicate.length) { noteIntake('duplicate', row.slug); continue; }
@@ -334,4 +343,26 @@ async function eventDisplay(data, row) {
     const file = receipt.data?.file || receipt.data;
     return typeof file?.name === 'string' ? { title: file.name.slice(0, 240) } : {};
   } catch { return {}; }
+}
+
+/**
+ * The event data without its top-level optional fields whose type the schema rejected, or null when any other check failed (a
+ * required field, a nested structure, a format of a required field). Composio's payloads drift in optional fields between trigger versions.
+ * @param {unknown} data Event data.
+ * @param {object} schema The subscription's payload schema.
+ * @param {Array<{instancePath:string,keyword:string}>} errors Ajv errors of the failed check.
+ * @returns {object|null} The repaired data, or null.
+ */
+export function withoutMistypedOptionalFields(data, schema, errors) {
+  if (!data || typeof data !== 'object' || Array.isArray(data) || !errors.length) return null;
+  const required = new Set(Array.isArray(schema?.required) ? schema.required : []);
+  const fields = new Set();
+  for (const error of errors) {
+    const field = /^\/([^/]+)(?:\/|$)/.exec(error.instancePath || '')?.[1];
+    if (!field || required.has(field) || !['type', 'format', 'enum', 'items', 'additionalProperties', 'minItems', 'maxItems', 'minLength', 'maxLength'].includes(error.keyword)) return null;
+    fields.add(field.replace(/~1/g, '/').replace(/~0/g, '~'));
+  }
+  const repaired = { ...data };
+  for (const field of fields) delete repaired[field];
+  return repaired;
 }

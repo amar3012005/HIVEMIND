@@ -63,6 +63,12 @@ invoke this method instead of relying on WebView Blob-download anchors.
   survives a reinstall.
 - Rooms: see `openRoom` in `src/native-bridge.d.ts`. The room's own back control posts `hivemind.open-dot.back` to the
   `hivemindRoom` message handler (main frame of an allowed room host only), which closes the room like Done.
+- Service workers: `WKAppBoundDomains` (Info.plist: singulancelabs.com and the next., api., runtime-runner., dots. hosts; iOS
+  allows 10) and `limitsNavigationsToAppBoundDomains` (Capacitor config for the main web view, set in code for room views)
+  let the room hosts register service workers. Room views use the persistent per-scope store (default persistent store
+  without a scope); sign-out removes the room stores and the room hosts' site data. The last opened room is kept as one
+  hidden, loaded view (`prewarmRoom`, after sign-in, on launch and on return to the foreground); it is released when the app
+  enters the background because its store holds the Control session cookie.
 - Debug builds log each native request as method, host, path, status and duration (`[native-http]`), never query
   strings, headers or bodies. Release builds log nothing.
 

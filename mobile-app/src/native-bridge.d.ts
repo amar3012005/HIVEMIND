@@ -23,6 +23,8 @@ export interface SingulanceNative {
    * without it the store is discarded on close. Control's session cookie is deleted from the store when the room closes.
    */
   openRoom(options: {path: string; scope?: string}): Promise<void>;
+  /** Loads the room hidden so a later openRoom shows it already rendered; at most one room is kept warm. */
+  prewarmRoom(options: {path: string; scope?: string}): Promise<void>;
   /** Small non-secret settings kept in the Keychain (they survive a reinstall). Only `privacyChoice`; values up to 4 KiB. */
   getPreference(options: {key: 'privacyChoice'}): Promise<{value: string | null}>;
   setPreference(options: {key: 'privacyChoice'; value: string}): Promise<void>;

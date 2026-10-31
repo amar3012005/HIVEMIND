@@ -36,7 +36,11 @@ assert.match(iosBridge, /kSecAttrAccessibleWhenUnlockedThisDeviceOnly/);
 assert.match(iosBridge, /message.frameInfo.isMainFrame/);
 assert.match(iosBridge, /completionHandler\(nil\)/);
 // OpenDot rooms: isolated storage, fixed hosts, the session cookie stays native.
-assert.match(iosBridge, /configuration.websiteDataStore = .nonPersistent\(\)/);
+assert.match(iosBridge, /configuration.websiteDataStore = .default\(\)/);
+assert.match(iosBridge, /configuration.limitsNavigationsToAppBoundDomains = true/);
+assert.match(config, /limitsNavigationsToAppBoundDomains: true/);
+for (const host of ['singulancelabs.com', 'next.singulancelabs.com', 'api.singulancelabs.com', 'runtime-runner.singulancelabs.com', 'dots.singulancelabs.com']) assert.match(plist, new RegExp(`<string>${host.replaceAll('.', '\\.')}</string>`));
+assert.match(plist, /WKAppBoundDomains/);
 assert.match(iosBridge, /allowedHosts: \[self.roomHost, "dots.singulancelabs.com"\]/);
 assert.match(iosBridge, /\^\/employees\/\[0-9a-fA-F\]\{8\}/);
 assert.doesNotMatch(iosBridge, /call\.resolve\(\[[^\]]*cookie/i);

@@ -10,7 +10,7 @@ import CryptoKit
 public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTaskDelegate, UIDocumentPickerDelegate, ASWebAuthenticationPresentationContextProviding {
     public let identifier = "SingulanceNativePlugin"
     public let jsName = "SingulanceNative"
-    public let pluginMethods: [CAPPluginMethod] = ["authenticate", "setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance", "workspaceAccess", "openRoom", "closeRoom", "getPreference", "setPreference", "removePreference"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
+    public let pluginMethods: [CAPPluginMethod] = ["authenticate", "setCredential", "getCredential", "removeCredential", "request", "openStream", "closeStream", "saveFile", "getAppearance", "workspaceAccess", "openRoom", "closeRoom", "prewarmRoom", "getPreference", "setPreference", "removePreference"].map { CAPPluginMethod(name: $0, returnType: CAPPluginReturnPromise) }
     private var authenticationSession: ASWebAuthenticationSession?
     public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         return bridge!.viewController!.view.window!
@@ -117,6 +117,7 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
             item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw NativeError.denied }
             call.resolve()
+            if key == "cpToken" { prewarmLastRoom() }
         } catch { call.reject("Credential could not be stored.") }
     }
     @objc func getCredential(_ call: CAPPluginCall) {
@@ -134,7 +135,13 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
                 session.getAllTasks { tasks in for task in tasks { task.cancel() } }
                 controlSessionLock.lock(); controlSession = nil; controlSessionLock.unlock()
                 for cookie in runtimeCookies?.cookies ?? [] { runtimeCookies?.deleteCookie(cookie) }
-                DispatchQueue.main.async { self.room?.closeSilently(); self.room = nil; RoomViewController.removeStores(keeping: nil) }
+                UserDefaults.standard.removeObject(forKey: Self.lastRoomPathKey); UserDefaults.standard.removeObject(forKey: Self.lastRoomScopeKey)
+                DispatchQueue.main.async {
+                    self.room?.closeSilently(); self.room = nil
+                    self.discardWarmRoom()
+                    RoomViewController.removeStores(keeping: nil)
+                    RoomViewController.removeSiteData(hosts: self.roomDataHosts)
+                }
             }
             call.resolve()
         } catch { call.reject("Credential could not be removed.") }
@@ -279,20 +286,83 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
             }.resume()
         }
     }
+    private static let lastRoomPathKey = "singulance.lastRoom.path"
+    private static let lastRoomScopeKey = "singulance.lastRoom.scope"
+    private static let roomPathPattern = "^/employees/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    /// Hosts whose site data (service worker, caches, IndexedDB, cookies) is removed on sign-out.
+    private let roomDataHosts = ["runtime-runner.singulancelabs.com", "dots.singulancelabs.com"]
+    /// At most one room view is kept hidden and loaded so the last opened room opens without a load.
+    private var warmRoom: RoomViewController?
+    private var warmPath: String?
+    private var warmScope: String?
+    private var lifecycleObservers: [NSObjectProtocol] = []
+    private func roomScope(_ value: String?) -> String? { value.flatMap { $0.count <= 200 && !$0.isEmpty ? $0 : nil } }
+    private func roomURL(_ path: String?) -> URL? {
+        guard let path = path, path.range(of: Self.roomPathPattern, options: .regularExpression) != nil else { return nil }
+        return URL(string: "https://" + roomHost + path + "?embed=hivemind")
+    }
+    public override func load() {
+        // The warm room holds the Control session cookie in its store: release it when the app leaves the foreground and rebuild it on return.
+        let center = NotificationCenter.default
+        lifecycleObservers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in self?.discardWarmRoom() })
+        lifecycleObservers.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in self?.prewarmLastRoom() })
+        DispatchQueue.main.async { self.prewarmLastRoom() }
+    }
+    private func discardWarmRoom() {
+        warmRoom?.closeSilently(); warmRoom = nil; warmPath = nil; warmScope = nil
+    }
+    private func prewarmLastRoom() {
+        let defaults = UserDefaults.standard
+        prewarm(path: defaults.string(forKey: Self.lastRoomPathKey), scope: roomScope(defaults.string(forKey: Self.lastRoomScopeKey)))
+    }
+    private func prewarm(path: String?, scope: String?, completion: (() -> Void)? = nil) {
+        guard room == nil, let url = roomURL(path), let path = path, (try? read("cpToken")) != nil else { completion?(); return }
+        if warmRoom != nil, warmPath == path, warmScope == scope { completion?(); return }
+        controlCookie { cookie in
+            DispatchQueue.main.async {
+                defer { completion?() }
+                guard let cookie = cookie, self.room == nil else { return }
+                self.discardWarmRoom()
+                let controller = RoomViewController(allowedHosts: [self.roomHost, "dots.singulancelabs.com"], scope: scope) { [weak self] in
+                    self?.room = nil
+                    self?.notifyListeners("roomClosed", data: [:])
+                }
+                self.warmRoom = controller; self.warmPath = path; self.warmScope = scope
+                controller.show(url, cookie: cookie)
+            }
+        }
+    }
+    /// Loads the room view for `path` hidden so a later openRoom shows it already rendered.
+    @objc func prewarmRoom(_ call: CAPPluginCall) {
+        guard trusted(), roomURL(call.getString("path")) != nil else { call.reject("Room is not allowed."); return }
+        prewarm(path: call.getString("path"), scope: roomScope(call.getString("scope"))) { call.resolve() }
+    }
     @objc func openRoom(_ call: CAPPluginCall) {
-        guard trusted(), let path = call.getString("path"),
-              path.range(of: "^/employees/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", options: .regularExpression) != nil,
-              let url = URL(string: "https://" + roomHost + path + "?embed=hivemind") else { call.reject("Room is not allowed."); return }
+        guard trusted(), let path = call.getString("path"), let url = roomURL(path) else { call.reject("Room is not allowed."); return }
         // The signed-in company and person; rooms of one scope share one persistent store, other scopes' stores are removed.
-        let scope = call.getString("scope").flatMap { $0.count <= 200 && !$0.isEmpty ? $0 : nil }
+        let scope = roomScope(call.getString("scope"))
+        UserDefaults.standard.set(path, forKey: Self.lastRoomPathKey)
+        if let scope = scope { UserDefaults.standard.set(scope, forKey: Self.lastRoomScopeKey) } else { UserDefaults.standard.removeObject(forKey: Self.lastRoomScopeKey) }
         controlCookie { cookie in
             DispatchQueue.main.async {
                 guard let cookie = cookie else { call.reject("Room could not open."); return }
                 if let open = self.room { open.show(url, cookie: cookie); call.resolve(); return }
                 guard let presenter = self.bridge?.viewController else { call.reject("Room could not open."); return }
-                let controller = RoomViewController(allowedHosts: [self.roomHost, "dots.singulancelabs.com"], scope: scope) { [weak self] in
+                let controller: RoomViewController
+                if let warm = self.warmRoom, self.warmScope == scope {
+                    controller = warm
+                    self.warmRoom = nil; self.warmPath = nil; self.warmScope = nil
+                } else {
+                    self.discardWarmRoom()
+                    controller = RoomViewController(allowedHosts: [self.roomHost, "dots.singulancelabs.com"], scope: scope) { [weak self] in
+                        self?.room = nil
+                        self?.notifyListeners("roomClosed", data: [:])
+                    }
+                }
+                controller.onClose = { [weak self] in
                     self?.room = nil
                     self?.notifyListeners("roomClosed", data: [:])
+                    self?.prewarm(path: path, scope: scope)
                 }
                 self.room = controller
                 controller.modalPresentationStyle = .fullScreen
@@ -403,7 +473,8 @@ private class TrustedFrameHandler: NSObject, WKScriptMessageHandler {
 /// Full-screen host for one OpenDot room: isolated storage, https navigation limited to the room's own hosts, no new windows.
 private final class RoomViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     private let allowedHosts: [String]
-    private let onClose: () -> Void
+    var onClose: () -> Void
+    private var loadedURL: URL?
     private var silent = false
     private let webView: WKWebView
     private static let storePrefix = "singulance-room:"
@@ -425,14 +496,17 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
         self.allowedHosts = allowedHosts
         self.onClose = onClose
         let configuration = WKWebViewConfiguration()
-        // One persistent store per company and person keeps the room's own history cache (OpenDot IndexedDB) between
-        // openings. Without a scope, or before iOS 17, the room uses a store that is discarded when it closes.
+        // One persistent store per company and person keeps the room's service worker, caches and history (OpenDot
+        // IndexedDB) between openings and app restarts. Without a scope, or before iOS 17, the default persistent store
+        // is used; sign-out removes the room hosts' data from it.
         if #available(iOS 17.0, *), let scope = scope {
             RoomViewController.removeStores(keeping: scope)
             configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: RoomViewController.storeIdentifier(scope))
         } else {
-            configuration.websiteDataStore = .nonPersistent()
+            configuration.websiteDataStore = .default()
         }
+        // Service workers in WKWebView require App-Bound Domains (Info.plist WKAppBoundDomains).
+        configuration.limitsNavigationsToAppBoundDomains = true
         configuration.allowsInlineMediaPlayback = true
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(nibName: nil, bundle: nil)
@@ -466,7 +540,17 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
     }
     func show(_ url: URL, cookie: HTTPCookie) {
         loadViewIfNeeded()
-        webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) { self.webView.load(URLRequest(url: url)) }
+        let alreadyLoaded = loadedURL == url
+        loadedURL = url
+        webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie) { if !alreadyLoaded { self.webView.load(URLRequest(url: url)) } }
+    }
+    /// Removes service workers, caches, IndexedDB and cookies of `hosts` from the default persistent store.
+    static func removeSiteData(hosts: [String]) {
+        let store = WKWebsiteDataStore.default()
+        store.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
+            let doomed = records.filter { record in hosts.contains { record.displayName == $0 || $0.hasSuffix("." + record.displayName) } }
+            store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), for: doomed) { }
+        }
     }
     /// The Control session cookie is a credential: it never stays in the persistent store after the room closes.
     private func forgetSession() {
@@ -478,7 +562,7 @@ private final class RoomViewController: UIViewController, WKNavigationDelegate, 
               let body = message.body as? [String: Any], body["version"] as? Int == 1, body["type"] as? String == "hivemind.open-dot.back" else { return }
         finish()
     }
-    func closeSilently() { silent = true; webView.stopLoading(); forgetSession(); dismiss(animated: true) }
+    func closeSilently() { silent = true; loadedURL = nil; webView.stopLoading(); forgetSession(); if presentingViewController != nil { dismiss(animated: true) } }
     @objc private func finish() { webView.stopLoading(); forgetSession(); dismiss(animated: true) { self.onClose() } }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }

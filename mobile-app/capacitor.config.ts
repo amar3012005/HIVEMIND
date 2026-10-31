@@ -18,7 +18,8 @@ const config: CapacitorConfig = {
     errorPath: 'offline.html',
   },
   android: { allowMixedContent: false, webContentsDebuggingEnabled: false, minWebViewVersion: 90 },
-  ios: { contentInset: 'never' },
+  // App-Bound Domains (Info.plist WKAppBoundDomains) are required for service workers in the room panes.
+  ios: { contentInset: 'never', limitsNavigationsToAppBoundDomains: true },
   plugins: {
     Keyboard: { resize: 'native', resizeOnFullScreen: true },
     SystemBars: { insetsHandling: 'css' },

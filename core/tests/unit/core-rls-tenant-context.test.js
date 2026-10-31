@@ -98,8 +98,10 @@ test('withTenant with the flag on sets transaction-local org and user before the
   const setCall = prisma.calls[1];
   assert.match(setCall.sql, /set_config\('app\.current_org_id', \?::text, true\)/);
   assert.match(setCall.sql, /set_config\('app\.current_user_id', \?::text, true\)/);
+  assert.match(setCall.sql, /set_config\('app\.hivemind_org_id', \?::text, true\)/);
+  assert.match(setCall.sql, /set_config\('app\.hivemind_user_id', \?::text, true\)/);
   assert.doesNotMatch(setCall.sql, /false/i);
-  assert.deepEqual(setCall.values, [ORG, USER]);
+  assert.deepEqual(setCall.values, [ORG, USER, ORG, USER]);
   assert.deepEqual(prisma.calls[0].options, { timeout: 30000 });
 });
 
@@ -114,7 +116,7 @@ test('withTenant honours HIVEMIND_RLS_TX_TIMEOUT_MS', async () => {
 test('raw pg statement is parameterized and transaction-local', () => {
   assert.equal(
     TENANT_CONTEXT_SQL,
-    "SELECT set_config('app.current_org_id', $1::text, true), set_config('app.current_user_id', $2::text, true)",
+    "SELECT set_config('app.current_org_id', $1::text, true), set_config('app.current_user_id', $2::text, true), set_config('app.hivemind_org_id', $1::text, true), set_config('app.hivemind_user_id', $2::text, true)",
   );
 });
 
@@ -192,7 +194,7 @@ test('runTenantScoped inside an existing transaction sets context on it without 
     await db.memory.findMany({});
   });
   assert.deepEqual(prisma.calls.map((c) => c.kind), ['executeRaw', 'findMany']);
-  assert.deepEqual(prisma.calls[0].values, [ORG, USER]);
+  assert.deepEqual(prisma.calls[0].values, [ORG, USER, ORG, USER]);
 });
 
 test('runTenantScoped outside a transaction opens one', async () => {

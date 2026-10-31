@@ -10,6 +10,12 @@
  * request that borrows the pooled connection. The session-level
  * `set_app_context()` function in schema.sql must not be used for this reason.
  *
+ * Two naming conventions are set together. `app.current_*` is read by the
+ * legacy schema.sql policies. `app.hivemind_org_id` / `app.hivemind_user_id` is
+ * read by the harness/app-runtime policies and by the runner-role policies in
+ * core/prisma/staged/20261024_core_rls_runner_tables, so one transaction-local
+ * context satisfies both.
+ *
  * Everything is gated by HIVEMIND_RLS_TENANT_CONTEXT (default off). With the
  * flag off, every helper calls `fn` with the client or pool it was given and
  * issues no statement, so existing behaviour is unchanged.
@@ -26,7 +32,7 @@ export const TENANT_CONTEXT_FLAG = 'HIVEMIND_RLS_TENANT_CONTEXT';
 
 /** Parameterized statement used on raw pg clients ($1 = org id, $2 = user id). */
 export const TENANT_CONTEXT_SQL =
-  "SELECT set_config('app.current_org_id', $1::text, true), set_config('app.current_user_id', $2::text, true)";
+  "SELECT set_config('app.current_org_id', $1::text, true), set_config('app.current_user_id', $2::text, true), set_config('app.hivemind_org_id', $1::text, true), set_config('app.hivemind_user_id', $2::text, true)";
 
 /**
  * @param {Record<string, string|undefined>} [env]
@@ -56,7 +62,7 @@ export function tenantContextValues({ orgId, userId } = {}) {
  */
 export async function applyPrismaTenantContext(tx, ctx) {
   const [org, user] = tenantContextValues(ctx);
-  await tx.$executeRaw`SELECT set_config('app.current_org_id', ${org}::text, true), set_config('app.current_user_id', ${user}::text, true)`;
+  await tx.$executeRaw`SELECT set_config('app.current_org_id', ${org}::text, true), set_config('app.current_user_id', ${user}::text, true), set_config('app.hivemind_org_id', ${org}::text, true), set_config('app.hivemind_user_id', ${user}::text, true)`;
 }
 
 /**

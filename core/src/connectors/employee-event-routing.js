@@ -83,6 +83,9 @@ export function routingConfig(env = process.env) {
     githubOrgs: new Set(String(env.HIVEMIND_EMPLOYEE_EVENT_GITHUB_ORGS ?? '').split(',').map(item => item.trim().toLowerCase()).filter(Boolean)),
     // Companies whose events OpenDot routes: Core only forwards them. Empty by default, so every company keeps Core's routing.
     forwardOrgs: new Set(String(env.HIVEMIND_EMPLOYEE_EVENT_FORWARD_ORGS ?? '').split(',').map(item => item.trim().toLowerCase()).filter(item => UUID.test(item))),
+    // Companies that see every connected-app event while Runtime is off: the relevance check is recorded but rejects nothing.
+    // A company that later asks for important or company-related events only is removed from this list.
+    deliverAllOrgs: new Set(String(env.HIVEMIND_EMPLOYEE_EVENT_DELIVER_ALL_ORGS ?? '').split(',').map(item => item.trim().toLowerCase()).filter(item => UUID.test(item))),
   });
 }
 

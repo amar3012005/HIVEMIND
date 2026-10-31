@@ -25,7 +25,7 @@ test('every channel the preload invokes is registered in the main bridge', async
   const api = exposed.singulanceDesktop;
   await api.tokenStore.get('cpToken'); await api.tokenStore.set('cpToken', 'x'); await api.tokenStore.remove('cpToken');
   await api.prefs.get('k'); await api.prefs.set('k', 'v');
-  await api.request({}); await api.workspaceAccess(); await api.openRoom({}); await api.closeRoom();
+  await api.request({}); await api.workspaceAccess(); await api.openRoom({}); await api.prewarmRoom({}); await api.closeRoom({});
   await api.notify({}); await api.setUnread(1);
   for (const [c] of invoked) assert.ok(CHANNELS.includes(c), c);
   assert.equal(new Set(invoked.map(([c]) => c)).size, CHANNELS.length, 'every registered channel is reachable');
@@ -36,7 +36,7 @@ test('preload exposes no raw ipcRenderer, require or process', () => {
   const api = exposed.singulanceDesktop;
   assert.ok(Object.isFrozen(api));
   for (const k of ['ipcRenderer', 'require', 'process', 'send', 'invoke']) assert.ok(!(k in api));
-  assert.deepEqual(Object.keys(api).sort(), ['closeRoom', 'notify', 'onForeground', 'onNotificationClick', 'onRoomClosed', 'openRoom', 'platform', 'prefs', 'request', 'setUnread', 'tokenStore', 'version', 'workspaceAccess']);
+  assert.deepEqual(Object.keys(api).sort(), ['closeRoom', 'notify', 'onForeground', 'onNotificationClick', 'onRoomClosed', 'openRoom', 'platform', 'prefs', 'prewarmRoom', 'request', 'setUnread', 'tokenStore', 'version', 'workspaceAccess']);
 });
 
 test('tokenStore only accepts credential keys through the bridge', async () => {
@@ -98,4 +98,59 @@ test('ipc registration rejects subframes and foreign senders', async () => {
   assert.throws(() => handlers['native:unread']({ senderFrame: sub, sender: { mainFrame: main } }, {}), /untrusted/);
   const evil = { url: 'https://evil.com/' };
   assert.throws(() => handlers['native:token:get']({ senderFrame: evil, sender: { mainFrame: evil } }, {}), /untrusted/);
+});
+
+// ── Control session cookie cache and room channels ──
+function roomBridge({ clock, fetchCore, rooms, lastRoom, token = 'T0K' }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-'));
+  const safe = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => b.toString() };
+  const ts = new TokenStore({ safeStorage: safe, dir }); if (token) ts.set('cpToken', token);
+  return createBridge({ tokenStore: ts, fetchCore, fetchRunner: async () => {}, prefsFile: path.join(dir, 'p.json'), setUnread() {}, rooms, notifier: {}, lastRoom, now: () => clock.t });
+}
+const P1 = '/employees/11111111-1111-1111-1111-111111111111';
+const sessionResp = (extra = '') => ({ status: 200, headers: { getSetCookie: () => [`hm_cp_session=abc; Secure; HttpOnly${extra}`] } });
+
+test('session cookie is fetched once and reused for 10 minutes, then fetched again', async () => {
+  const clock = { t: 1_000_000 }; let fetches = 0; const opened = [];
+  const rooms = { open: async (a) => { opened.push(await a.getCookie()); }, prewarm: async () => {}, close() {} };
+  const b = roomBridge({ clock, rooms, fetchCore: async () => { fetches++; return sessionResp(); } });
+  await b.handlers['native:room:open']({ path: P1 });
+  await b.handlers['native:room:open']({ path: P1 });
+  clock.t += 9 * 60_000;
+  await b.handlers['native:room:open']({ path: P1 });
+  assert.equal(fetches, 1);
+  clock.t += 2 * 60_000; // 11 minutes in
+  await b.handlers['native:room:open']({ path: P1 });
+  assert.equal(fetches, 2);
+  assert.equal(opened.length, 4); assert.equal(opened[0].value, 'abc');
+});
+
+test('cookie cache honours a shorter Max-Age and is dropped on token change and sign-out', async () => {
+  const clock = { t: 0 }; let fetches = 0;
+  const rooms = { open: async (a) => { await a.getCookie(); }, prewarm: async () => {}, close() {} };
+  const b = roomBridge({ clock, rooms, fetchCore: async () => { fetches++; return sessionResp('; Max-Age=180'); } });
+  await b.handlers['native:room:open']({ path: P1 });
+  clock.t += 100_000; await b.handlers['native:room:open']({ path: P1 });
+  assert.equal(fetches, 1, 'still valid 100 s in (180 s minus 60 s margin)');
+  clock.t += 30_000; await b.handlers['native:room:open']({ path: P1 });
+  assert.equal(fetches, 2, 'expired at 120 s');
+  b.handlers['native:token:set']({ key: 'cpToken', value: 'OTHER' });
+  await b.handlers['native:room:open']({ path: P1 });
+  assert.equal(fetches, 3, 'new token, new session');
+  await b.handlers['native:token:remove']({ key: 'cpToken' });
+  let got; const r2 = { open: async (a) => { got = await a.getCookie(); }, prewarm: async () => {}, close() {} };
+  const b2 = roomBridge({ clock, rooms: r2, fetchCore: async () => sessionResp(), token: null });
+  await b2.handlers['native:room:open']({ path: P1 });
+  assert.equal(got, null, 'signed out gives no cookie');
+});
+
+test('room close passes the path and is silent; invalid path rejected; prewarm uses the last room', async () => {
+  const clock = { t: 0 }; const closes = []; const prewarms = [];
+  const rooms = { open: async () => {}, prewarm: async (a) => { prewarms.push([a.path, a.scope]); }, close: (a) => closes.push(a) };
+  const b = roomBridge({ clock, rooms, fetchCore: async () => sessionResp(), lastRoom: { get: () => ({ path: P1, scope: 's' }) } });
+  b.handlers['native:room:close']({ path: P1 });
+  assert.deepEqual(closes, [{ path: P1, silent: true }]);
+  assert.throws(() => b.handlers['native:room:close']({ path: '/evil' }), /room/);
+  await b.prewarmLastRoom();
+  assert.deepEqual(prewarms, [[P1, 's']]);
 });

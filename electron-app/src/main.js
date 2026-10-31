@@ -7,7 +7,8 @@ const fs = require('fs');
 const notch = require('./notch');
 const { TokenStore } = require('./native/token-store');
 const { createBridge, registerBridge } = require('./native/bridge');
-const { createRoomManager, PARTITION: ROOM_PARTITION } = require('./native/room');
+const { createRoomManager, createLastRoomStore, PARTITION: ROOM_PARTITION } = require('./native/room');
+const { createUpdateStatus } = require('./native/update-status');
 const { createScreens } = require('./native/screens');
 const { createNotifier } = require('./native/notifier');
 const { parseDeepLink, isTrustedSender } = require('./native/policy');
@@ -28,7 +29,6 @@ let tray = null;
 let isQuitting = false;
 let pendingDeepLink = null;
 let lastForeground = 0;
-let updateState = 'idle'; // idle | checking | downloading | downloaded | none | error
 
 // ── App metadata ──────────────────────────────────────────────
 app.setName('SINGULANCE');
@@ -175,7 +175,7 @@ function createWindow() {
 
   mainWindow.webContents.on('dom-ready', flushDeepLink);
   // Prewarm the isolated room view once the app has painted, so the first room opens warm.
-  mainWindow.webContents.once('dom-ready', () => setTimeout(() => { rooms.prewarm().catch(() => {}); }, 1500));
+  mainWindow.webContents.once('dom-ready', () => setTimeout(() => { bridge.prewarmLastRoom().catch(() => {}); }, 1500));
   mainWindow.on('focus', notifyForeground);
   mainWindow.on('show', notifyForeground);
 
@@ -291,7 +291,7 @@ function createWindow() {
   });
 
   mainWindow.on('closed', () => {
-    rooms.close({ silent: true });
+    rooms.destroy({ forget: false });
     mainWindow = null;
   });
 }
@@ -412,19 +412,18 @@ function createMenu() {
 // background checks stay quiet unless an update is actually ready.
 let manualCheck = false;
 
-function sendUpdate(status, payload = {}) {
-  updateState = status;
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update-status', { status, ...payload });
-  }
-}
+// Latest status (idle | checking | downloading | downloaded | none | error), replayed to late subscribers.
+const updates = createUpdateStatus({
+  send: (data) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', data); },
+});
+const sendUpdate = (status, payload) => updates.set(status, payload);
 
 function checkForUpdates(manual = false) {
   if (isDev) {
     if (manual) dialog.showMessageBox(mainWindow, { type: 'info', title: 'Updates', message: 'Update checks are disabled in dev.' });
     return;
   }
-  if (updateState === 'downloading') {
+  if (updates.state() === 'downloading') {
     if (manual) dialog.showMessageBox(mainWindow, { type: 'info', title: 'Updating', message: 'An update is already downloading.' });
     return;
   }
@@ -471,25 +470,18 @@ autoUpdater.on('update-downloaded', (info) => {
   log.info('update downloaded', info && info.version);
   sendUpdate('downloaded', { version: info && info.version });
   if (process.platform === 'darwin' && app.dock) app.dock.setBadge('');
-  dialog.showMessageBox(mainWindow, {
-    type: 'info',
-    title: 'Update Ready',
-    message: `SINGULANCE ${info && info.version ? info.version : ''} is ready.`,
-    detail: 'Restart now to apply, or it will install automatically next time you quit.',
-    buttons: ['Restart Now', 'Later'],
-    defaultId: 0,
-    cancelId: 1,
-  }).then(({ response }) => {
-    if (response === 0) { isQuitting = true; autoUpdater.quitAndInstall(); }
-  });
+  // No modal: the outer app shows the update button and card from the 'update-status' it receives.
 });
 
 // ── Native bridge (PlatformAdapter) ───────────────────────────
 // Core calls use an in-memory session with no cookies; Runner calls use their own private jar.
 const tokenStore = new TokenStore({ safeStorage, dir: path.join(app.getPath('userData'), 'secure') });
+const roomsLast = createLastRoomStore({ file: path.join(app.getPath('userData'), 'last-room.json') });
 const rooms = createRoomManager({
   electron,
   getWindow: () => mainWindow,
+  preload: path.join(__dirname, 'room-preload.js'),
+  lastRoom: roomsLast,
   onClosed: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('native:room-closed'); },
 });
 // On-device screens (W5): same-origin interceptor so cookies keep working; see native/screens.js.
@@ -509,6 +501,7 @@ const bridge = createBridge({
   fetchCore: (url, init) => session.fromPartition('singulance-core').fetch(url, { ...init, credentials: 'omit' }),
   fetchRunner: (url, init) => session.fromPartition('singulance-runner').fetch(url, { ...init, credentials: 'include' }),
   rooms,
+  lastRoom: roomsLast,
   notifier,
   prefsFile: path.join(app.getPath('userData'), 'prefs.json'),
   setUnread: (count) => {
@@ -517,12 +510,15 @@ const bridge = createBridge({
     if (tray) tray.setToolTip(count ? `SINGULANCE (${count})` : 'SINGULANCE');
   },
   onSignOut: async () => {
-    rooms.close({ silent: true });
+    rooms.destroy();
     screens.clear();
     await session.fromPartition('singulance-runner').clearStorageData().catch(() => {});
   },
 });
 registerBridge(ipcMain, bridge);
+// Back message from the room page (room preload); the manager checks sender frame, host and message.
+ipcMain.removeAllListeners('native:room:back');
+ipcMain.on('native:room:back', (event, msg) => { rooms.handleBack(event, msg); });
 
 // ── App lifecycle ─────────────────────────────────────────────
 ipcMain.handle('open-external', (event, url) => {
@@ -530,8 +526,12 @@ ipcMain.handle('open-external', (event, url) => {
 });
 
 ipcMain.handle('check-for-updates', () => { checkForUpdates(true); });
+ipcMain.handle('get-update-status', (event) => {
+  if (!event.senderFrame || !isTrustedSender(event.senderFrame.url)) return { status: 'idle' };
+  return updates.get();
+});
 ipcMain.handle('install-update', () => {
-  if (updateState === 'downloaded') { isQuitting = true; autoUpdater.quitAndInstall(); }
+  if (updates.state() === 'downloaded') { isQuitting = true; autoUpdater.quitAndInstall(); }
 });
 
 // IPC: splash "launch" button → open main window, close splash

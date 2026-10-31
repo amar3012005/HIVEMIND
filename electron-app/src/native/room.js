@@ -1,13 +1,49 @@
 'use strict';
 // OpenDot employee room as a top-level view in an isolated, in-memory session. The room host
 // refuses to be framed by a foreign parent, so it cannot be an iframe of a non-website origin.
+//
+// One view is kept. It is shown at once on open (own background, no blank flash) and loads the room
+// afterwards. The view of the last opened room is prewarmed hidden, so reopening it needs no load unless
+// that load ended in an error. The Control session cookie lives in the room partition for all rooms of one
+// person; it is removed only by destroy() (sign-out, window closed), never by closing a room.
+const nodeFs = require('node:fs');
+const nodePath = require('node:path');
 const policy = require('./policy');
 
 const PARTITION = 'singulance-room'; // no "persist:" prefix: memory only, gone on quit
+const ROOM_BACKGROUND = '#faf9f4';
 
-function createRoomManager({ electron, getWindow, onClosed }) {
+/** Last opened room (path and scope) in a small JSON file, so the next launch can prewarm it. */
+function createLastRoomStore({ file, fs = nodeFs }) {
+  return {
+    get() {
+      try {
+        const v = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (typeof v.path !== 'string') return null;
+        policy.roomUrl(v.path);
+        return { path: v.path, scope: policy.roomScope(v.scope) };
+      } catch { return null; }
+    },
+    set(path, scope) {
+      try {
+        fs.mkdirSync(nodePath.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({ path, scope: scope || null }), { mode: 0o600 });
+      } catch { /* best effort: prewarm just has nothing to load next launch */ }
+    },
+    clear() { try { fs.rmSync(file, { force: true }); } catch { /* nothing stored */ } },
+  };
+}
+
+function createRoomManager({ electron, getWindow, onClosed, preload, lastRoom = { get: () => null, set() {}, clear() {} } }) {
   const { WebContentsView, session } = electron;
   let view = null;
+  let viewPath = null;   // room the view holds (loading or loaded)
+  let viewScope = null;
+  let viewUrl = null;
+  let failed = false;    // the last main-frame load ended in an HTTP error or a load failure
+  let shownPath = null;  // room on screen, null while hidden
+  let generation = 0;    // bumped by every open/close/destroy so stale async steps stop
+  let winHooked = null;
 
   const ses = () => session.fromPartition(PARTITION);
 
@@ -24,17 +60,25 @@ function createRoomManager({ electron, getWindow, onClosed }) {
     await ses().cookies.set(cookie.domain ? { ...base, domain: `.${cookie.domain}` } : base);
   }
 
-  let winHooked = null;
-
   function ensureView(win) {
     if (!view) {
-      view = new WebContentsView({ webPreferences: { partition: PARTITION, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true } });
+      view = new WebContentsView({ webPreferences: { partition: PARTITION, sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true, ...(preload ? { preload } : {}) } });
+      if (view.setBackgroundColor) view.setBackgroundColor(ROOM_BACKGROUND);
       const wc = view.webContents;
       wc.setWindowOpenHandler(() => ({ action: 'deny' }));
       const guard = (event, target) => { if (target !== 'about:blank' && !policy.isRoomNavigationAllowed(target)) event.preventDefault(); };
       wc.on('will-navigate', guard);
       wc.on('will-redirect', guard);
       wc.on('will-frame-navigate', guard);
+      wc.on('did-navigate', (_e, _url, code) => { if (typeof code === 'number' && code >= 400) failed = true; });
+      wc.on('did-fail-load', (_e, code, _desc, _url, isMainFrame) => { if (isMainFrame && code !== -3) failed = true; });
+      wc.on('render-process-gone', () => { failed = true; });
+      wc.on('before-input-event', (event, input) => {
+        if (input.type !== 'keyDown' || shownPath === null) return;
+        const esc = input.key === 'Escape';
+        const back = input.key === '[' && input.meta && !input.control && !input.alt && !input.shift;
+        if (esc || back) { event.preventDefault(); close(); }
+      });
       ses().setPermissionRequestHandler((_wc, _permission, cb) => cb(false));
       ses().setPermissionCheckHandler(() => false);
       view.setVisible(false);
@@ -43,42 +87,124 @@ function createRoomManager({ electron, getWindow, onClosed }) {
     if (winHooked !== win) {
       winHooked = win;
       win.on('resize', layout);
-      win.on('closed', () => { view = null; winHooked = null; });
+      win.on('closed', () => { view = null; winHooked = null; shownPath = null; viewPath = null; });
     }
   }
 
-  /** Creates the isolated room view hidden, so its renderer is already running when the first room opens. */
-  async function prewarm() {
-    const win = getWindow();
-    if (!win || win.isDestroyed() || view) return;
-    ensureView(win);
-    layout();
-    try { await view.webContents.loadURL('about:blank'); } catch { /* prewarm is best effort; open() loads the room itself */ }
+  /** Loads `url` into the view; a rejected or error-status load marks the view failed so the next open reloads it. */
+  async function load(path, scope, url) {
+    viewPath = path; viewScope = scope; viewUrl = url; failed = false;
+    try { await view.webContents.loadURL(url); } catch { failed = true; }
   }
 
-  async function open(url, cookie) {
+  function scopeChanged(scope) {
+    const prev = lastRoom.get();
+    return !!prev && prev.scope !== scope;
+  }
+
+  /** Other persons' or companies' site data must not survive into this scope. */
+  async function dropStore() {
+    await ses().clearStorageData().catch(() => {});
+    await ses().clearCache().catch(() => {});
+  }
+
+  /**
+   * Loads the room for `path` hidden. `getCookie` resolves the (cached) Control session cookie or null.
+   * Does nothing while a room is on screen or when the view already holds this room without an error.
+   */
+  async function prewarm({ path, scope = null, url, getCookie }) {
+    const win = getWindow();
+    if (!win || win.isDestroyed() || shownPath !== null) return;
+    if (view && viewPath === path && viewScope === scope && !failed) return;
+    const gen = ++generation;
+    const cookie = await getCookie();
+    if (!cookie || gen !== generation || shownPath !== null || win.isDestroyed()) return;
+    if (scopeChanged(scope)) await dropStore();
+    await setCookie(cookie);
+    if (gen !== generation) return;
+    ensureView(win);
+    layout();
+    await load(path, scope, url);
+  }
+
+  /**
+   * Shows the room view at once, then loads the room unless the view already holds it without an error.
+   * A signed-out session closes the view again and throws.
+   */
+  async function open({ path, scope = null, url, getCookie }) {
     const win = getWindow();
     if (!win || win.isDestroyed()) throw new Error('no window');
-    await setCookie(cookie);
+    const gen = ++generation;
+    const warm = !!view && viewPath === path && viewScope === scope && !failed;
+    const changedScope = scopeChanged(scope);
+    lastRoom.set(path, scope);
     ensureView(win);
     layout();
+    shownPath = path;
     view.setVisible(true);
-    await view.webContents.loadURL(url);
     view.webContents.focus();
+    if (warm && !changedScope) return;
+    const cookie = await getCookie();
+    if (gen !== generation) return;
+    if (!cookie) { hide(); throw new Error('signed out'); }
+    if (changedScope) await dropStore();
+    await setCookie(cookie);
+    if (gen !== generation) return;
+    await load(path, scope, url);
+    if (gen === generation && view) view.webContents.focus();
   }
 
-  function close({ silent = false } = {}) {
+  function hide() {
+    if (view) view.setVisible(false);
+    shownPath = null;
+  }
+
+  /**
+   * Closes the room on screen. With `path`, only if that room is the one shown (a page leaving after another
+   * room already opened must not close it). The session cookie stays: rooms of one person share it.
+   * `silent` skips the closed notification (the caller initiated the close).
+   */
+  function close({ path, silent = false } = {}) {
+    if (shownPath === null) return false;
+    if (path !== undefined && path !== shownPath) return false;
+    generation++;
+    hide();
+    if (!silent) onClosed();
+    // Refresh the hidden room in the background so the next open shows current content.
+    const reloadPath = viewPath; const reloadScope = viewScope; const reloadUrl = viewUrl; const gen = generation;
+    setTimeout(() => {
+      if (gen !== generation || shownPath !== null || !view || viewPath !== reloadPath) return;
+      load(reloadPath, reloadScope, reloadUrl).catch(() => {});
+    }, 500);
+    return true;
+  }
+
+  /** Removes the view, its site data and the session cookie (sign-out, window closed). */
+  function destroy({ forget = true } = {}) {
+    generation++;
     const win = getWindow();
-    if (!view) return;
-    const v = view; const wasOpen = v.getVisible(); view = null;
-    try { if (win && !win.isDestroyed()) win.contentView.removeChildView(v); } catch { /* window already tearing down */ }
-    try { v.webContents.close(); } catch { /* already destroyed */ }
-    ses().clearStorageData().catch(() => {});
-    ses().clearCache().catch(() => {});
-    if (!silent) { if (wasOpen) onClosed(); setTimeout(() => { prewarm().catch(() => {}); }, 500); }
+    const v = view; view = null; shownPath = null; viewPath = null; viewScope = null; viewUrl = null; failed = false;
+    if (v) {
+      try { if (win && !win.isDestroyed()) win.contentView.removeChildView(v); } catch { /* window already tearing down */ }
+      try { v.webContents.close(); } catch { /* already destroyed */ }
+    }
+    if (forget) { lastRoom.clear(); dropStore(); }
   }
 
-  return { open, close, prewarm, isOpen: () => view !== null && view.getVisible() };
+  /** IPC from the room preload: closes the room when the top frame of the room view posts the back message. */
+  function handleBack(event, msg) {
+    const frame = event && event.senderFrame;
+    if (!view || shownPath === null || !event.sender || event.sender !== view.webContents) return false;
+    if (!frame || frame !== event.sender.mainFrame || !policy.isRoomNavigationAllowed(frame.url)) return false;
+    if (!policy.isRoomBackMessage(msg)) return false;
+    return close();
+  }
+
+  return {
+    open, close, prewarm, destroy, handleBack,
+    isOpen: () => shownPath !== null,
+    state: () => ({ shownPath, viewPath, viewScope, failed }),
+  };
 }
 
-module.exports = { createRoomManager, PARTITION };
+module.exports = { createRoomManager, createLastRoomStore, PARTITION };

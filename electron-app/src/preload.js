@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('electron', {
     return () => ipcRenderer.removeListener('update-status', h);
   },
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  getUpdateStatus: () => ipcRenderer.invoke('get-update-status'),
   installUpdate: () => ipcRenderer.invoke('install-update'),
   retryConnect: () => ipcRenderer.invoke('retry-connect'),
   // Deep-link (singulance://) — OAuth callback delivery.
@@ -51,7 +52,8 @@ contextBridge.exposeInMainWorld('singulanceDesktop', Object.freeze({
   request: (options) => call('native:request', options),
   workspaceAccess: () => call('native:workspace-access'),
   openRoom: (options) => call('native:room:open', options),
-  closeRoom: () => call('native:room:close'),
+  prewarmRoom: (options) => call('native:room:prewarm', options),
+  closeRoom: (options) => call('native:room:close', options),
   onRoomClosed: (cb) => subscribe('native:room-closed', () => cb()),
   onForeground: (cb) => subscribe('native:foreground', () => cb()),
   notify: (n) => call('native:notify', n),

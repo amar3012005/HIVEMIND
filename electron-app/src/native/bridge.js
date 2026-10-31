@@ -10,12 +10,14 @@ const CHANNELS = Object.freeze([
   'native:token:get', 'native:token:set', 'native:token:remove',
   'native:prefs:get', 'native:prefs:set',
   'native:request', 'native:workspace-access',
-  'native:room:open', 'native:room:close',
+  'native:room:open', 'native:room:close', 'native:room:prewarm',
   'native:notify', 'native:unread',
 ]);
 
 function createBridge(deps) {
-  const { tokenStore, fetchCore, fetchRunner, rooms, notifier, setUnread, prefsFile, fs = nodeFs, onSignOut = () => {} } = deps;
+  const { tokenStore, fetchCore, fetchRunner, rooms, notifier, setUnread, prefsFile, fs = nodeFs, onSignOut = () => {}, lastRoom, now = Date.now } = deps;
+  const COOKIE_TTL_MS = 10 * 60 * 1000;
+  let cookieCache = null; // { token, cookie, until }
   const controllers = new Set();
 
   const readPrefs = () => { try { return JSON.parse(fs.readFileSync(prefsFile, 'utf8')); } catch { return {}; } };
@@ -85,12 +87,40 @@ function createBridge(deps) {
     return policy.parseSessionCookie(res.headers.getSetCookie ? res.headers.getSetCookie() : []);
   }
 
+  /**
+   * The Control session cookie, reused for at most ten minutes (and until a minute before it expires) so
+   * opening or prewarming rooms does not fetch a new session each time. Bound to the stored bearer.
+   */
+  async function cachedControlCookie() {
+    const token = tokenStore.get('cpToken');
+    if (!token) { cookieCache = null; return null; }
+    if (cookieCache && cookieCache.token === token && cookieCache.until > now()) return cookieCache.cookie;
+    const cookie = await controlCookie();
+    if (!cookie) { cookieCache = null; return null; }
+    let until = now() + COOKIE_TTL_MS;
+    if (typeof cookie.maxAgeSeconds === 'number') until = Math.min(until, now() + cookie.maxAgeSeconds * 1000 - 60_000);
+    else if (typeof cookie.expiresAt === 'number') until = Math.min(until, cookie.expiresAt - 60_000);
+    // Re-check the token: a sign-out or account switch during the fetch must not leave a stale entry.
+    cookieCache = tokenStore.get('cpToken') === token ? { token, cookie, until } : null;
+    return cookie;
+  }
+
+  /** Loads the last opened room hidden (launch, sign-in); a no-op without a stored room or session. */
+  async function prewarmLastRoom() {
+    const last = lastRoom && lastRoom.get();
+    if (!last || !tokenStore.get('cpToken')) return;
+    await rooms.prewarm({ path: last.path, scope: last.scope, url: policy.roomUrl(last.path), getCookie: cachedControlCookie });
+  }
+
   const handlers = {
     'native:token:get': ({ key } = {}) => ({ value: tokenStore.get(key) }),
-    'native:token:set': ({ key, value } = {}) => { tokenStore.set(key, value); },
+    'native:token:set': ({ key, value } = {}) => {
+      tokenStore.set(key, value);
+      if (key === 'cpToken') { cookieCache = null; prewarmLastRoom().catch(() => {}); }
+    },
     'native:token:remove': async ({ key } = {}) => {
       tokenStore.remove(key);
-      if (key === 'cpToken') { for (const c of controllers) c.abort(); controllers.clear(); await onSignOut(); }
+      if (key === 'cpToken') { cookieCache = null; for (const c of controllers) c.abort(); controllers.clear(); await onSignOut(); }
     },
     'native:prefs:get': ({ key } = {}) => {
       if (!policy.PREF_KEY.test(key || '')) throw new Error('pref key');
@@ -116,17 +146,22 @@ function createBridge(deps) {
       try { const j = JSON.parse((await readCapped(res)).toString('utf8')); if (typeof j.enabled === 'boolean') enabled = j.enabled; } catch { /* non-JSON body: status only */ }
       return enabled === undefined ? { status: res.status } : { status: res.status, enabled };
     },
-    'native:room:open': async ({ path } = {}) => {
+    'native:room:open': async ({ path, scope } = {}) => {
       const url = policy.roomUrl(path);
-      const cookie = await controlCookie();
-      if (!cookie) throw new Error('signed out');
-      await rooms.open(url, cookie);
+      await rooms.open({ path, scope: policy.roomScope(scope), url, getCookie: cachedControlCookie });
     },
-    'native:room:close': () => { rooms.close(); },
+    'native:room:prewarm': async ({ path, scope } = {}) => {
+      const url = policy.roomUrl(path);
+      await rooms.prewarm({ path, scope: policy.roomScope(scope), url, getCookie: cachedControlCookie });
+    },
+    'native:room:close': ({ path } = {}) => {
+      if (path !== undefined && path !== null) { policy.roomUrl(path); rooms.close({ path, silent: true }); return; }
+      rooms.close({ silent: true });
+    },
     'native:notify': (n = {}) => notifier.show(n),
     'native:unread': ({ count } = {}) => { setUnread(Number.isInteger(count) && count >= 0 ? Math.min(count, 999) : 0); },
   };
-  return { handlers, abortAll: () => { for (const c of controllers) c.abort(); controllers.clear(); } };
+  return { handlers, prewarmLastRoom, cachedControlCookie, abortAll: () => { for (const c of controllers) c.abort(); controllers.clear(); } };
 }
 
 /** Registers handlers on ipcMain; untrusted senders and subframes get a rejection. */

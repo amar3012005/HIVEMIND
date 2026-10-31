@@ -67,6 +67,14 @@ function isRoomNavigationAllowed(rawUrl) {
   catch { return false; }
 }
 
+/** A room scope (signed-in company and person) is an opaque string of 1-200 characters, otherwise null. */
+function roomScope(value) { return typeof value === 'string' && value.length >= 1 && value.length <= 200 ? value : null; }
+
+/** The one message a room page may post to close itself (same object the iOS shell receives). */
+function isRoomBackMessage(msg) {
+  return !!msg && typeof msg === 'object' && !Array.isArray(msg) && msg.type === 'hivemind.open-dot.back' && msg.version === 1;
+}
+
 /** True for the product origin (any singulancelabs.com subdomain over https) or the bundled offline page. */
 function isTrustedSender(rawUrl) {
   try {
@@ -98,7 +106,14 @@ function parseSessionCookie(lines) {
     if (!parts.slice(1).some((a) => a.toLowerCase() === 'secure')) continue;
     const dom = parts.slice(1).find((a) => a.toLowerCase().startsWith('domain='));
     const domain = dom ? dom.slice(7).replace(/^\./, '').toLowerCase() : null;
-    return { name, value: rest.join('='), domain: domain && (domain === 'singulancelabs.com' || domain.endsWith('.singulancelabs.com')) ? domain : null };
+    const out = { name, value: rest.join('='), domain: domain && (domain === 'singulancelabs.com' || domain.endsWith('.singulancelabs.com')) ? domain : null };
+    const maxAge = parts.slice(1).find((a) => a.toLowerCase().startsWith('max-age='));
+    const exp = parts.slice(1).find((a) => a.toLowerCase().startsWith('expires='));
+    const seconds = maxAge ? Number(maxAge.slice(8)) : NaN;
+    const at = exp ? Date.parse(exp.slice(8)) : NaN;
+    if (Number.isFinite(seconds)) out.maxAgeSeconds = seconds;
+    else if (Number.isFinite(at)) out.expiresAt = at;
+    return out;
   }
   return null;
 }
@@ -106,5 +121,5 @@ function parseSessionCookie(lines) {
 module.exports = {
   parseSessionCookie,
   CORE_HOST, RUNNER_HOST, ROOM_HOST, ROOM_HOSTS, MAX_REQUEST_BODY, MAX_RESPONSE_BODY, CREDENTIAL_KEYS, PREF_KEY,
-  classifyRequest, filterCallerHeaders, filterResponseHeaders, roomUrl, isRoomNavigationAllowed, isTrustedSender, parseDeepLink, safeAppPath,
+  classifyRequest, filterCallerHeaders, filterResponseHeaders, roomUrl, roomScope, isRoomBackMessage, isRoomNavigationAllowed, isTrustedSender, parseDeepLink, safeAppPath,
 };

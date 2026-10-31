@@ -129,3 +129,48 @@ test('signal: a forwarded event carries the Runtime verdict\'s assessment, urgen
   assert.equal(thin.assessment.need, 'useful_company_work');
   assert.equal(thin.appTools.slugs.length, 4, 'the default GitHub slugs');
 });
+
+test('a provider message seen through two connections of one mailbox is assessed once; later copies are duplicates, scoped to the company and account user', async () => {
+  const run = async (earlier) => {
+    const writes = [], calls = [], routed = [], copyQueries = [];
+    const row = { id: 'ev-second', subscription_id: 'sub-2', org_id: ORG, user_id: USER, received_at: new Date(Date.now() - 20_000).toISOString(), occurred_at: null,
+      data: { message_id: '19a2f0c0d1e2f3a4', subject: 'Invoice 42', text: 'Please pay by Friday' } };
+    const db = {
+      userOrganization: { findUnique: async () => ({ isActive: true, role: 'owner' }) },
+      organization: { findUnique: async () => ({ name: 'Acme', companyProfile: {} }) },
+      $queryRawUnsafe: async (sql, ...args) => {
+        if (sql.includes('UPDATE hivemind_trigger_events')) return [row];
+        if (sql.includes("COALESCE(e.data->>'message_id'")) { copyQueries.push(args); return earlier ? [{ id: earlier }] : []; }
+        if (sql.includes('runtime_enabled')) return [{ runtime_enabled: false }];
+        return [{ toolkit: 'gmail', slug: 'GMAIL_NEW_GMAIL_MESSAGE', subject: USER, runtime_attention: true, runtime_attention_enabled_at: '2026-10-01T00:00:00Z' }];
+      },
+      $executeRawUnsafe: async (sql, ...args) => { writes.push({ sql, args }); },
+    };
+    await classifyPendingActivity({ orgId: ORG, userId: USER, allowedAccountIds: ['a', 'b'], prisma: db, routingConfig: routingConfig({ ...base, HIVEMIND_ATTENTION_EMPLOYEE_ORGS_ACTIVE: ORG }),
+      relevanceDecider: async () => { calls.push('thin'); return { status: 'rejected', choice: 'unrelated', policy: 'company_activity_relevance_v3' }; },
+      employeeRouter: async (_db, input) => { routed.push(input.event.id); },
+      runtimeAttention: { assess: async () => { calls.push('runtime'); }, assessForEmployees: async () => { calls.push('employees'); return wake; } } });
+    const saved = writes.flatMap(write => write.args).find(arg => typeof arg === 'string' && arg.includes('"policy"'));
+    return { calls, routed, copyQueries, receipt: JSON.parse(saved) };
+  };
+  const duplicate = await run('ev-first');
+  assert.deepEqual(duplicate.receipt, { policy: 'company_activity_relevance_v3', status: 'rejected', source: 'duplicate', duplicateOf: 'ev-first' });
+  assert.deepEqual(duplicate.calls, [], 'no assessment is paid for a copy');
+  assert.deepEqual(duplicate.routed, [], 'a copy wakes nobody');
+  const [orgArg, userArg, idArg, toolkitArg, messageArg] = duplicate.copyQueries[0];
+  assert.deepEqual([orgArg, userArg, idArg, toolkitArg, messageArg], [ORG, USER, 'ev-second', 'gmail', '19a2f0c0d1e2f3a4'], 'the search is this company and account user only');
+  const first = await run(null);
+  assert.deepEqual(first.calls, ['employees'], 'the canonical copy is assessed as usual');
+  assert.equal(first.receipt.status, 'approved');
+});
+
+test('provider message ids: only message_id or messageId of a sane shape key a copy', async () => {
+  const { providerMessageId, earlierCopy } = await import('../../src/connectors/composio/activity-relevance.js');
+  assert.equal(providerMessageId({ message_id: '19a2f0c0d1e2f3a4' }), '19a2f0c0d1e2f3a4');
+  assert.equal(providerMessageId({ messageId: '<abc@mail.test>' }), '<abc@mail.test>');
+  assert.equal(providerMessageId({ id: 'evt_1' }), null);
+  assert.equal(providerMessageId({ message_id: 'a b' }), null);
+  let asked = false;
+  assert.equal(await earlierCopy({ $queryRawUnsafe: async () => { asked = true; return []; } }, { id: 'x', org_id: ORG, user_id: USER, received_at: new Date(), data: {} }, 'github'), null);
+  assert.equal(asked, false, 'no query without a message id');
+});

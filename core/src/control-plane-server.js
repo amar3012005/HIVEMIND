@@ -2598,6 +2598,10 @@ async function getCurrentSession(req) {
     return null;
   }
   const session = await sessionStore.getSession(sessionId);
+  if (session?.nativeMobile === true) {
+    // A signed-in phone stays signed in while it is used; a failed renewal never rejects a valid session.
+    await mobileAuthStore.renewNativeSession(sessionId, session).catch(() => false);
+  }
   return session ? { sessionId, session } : null;
 }
 

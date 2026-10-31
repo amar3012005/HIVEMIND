@@ -3,6 +3,9 @@ import { nativeSessionHash } from './native-principal.js';
 import { getRedisClient } from '../control-plane/session-store.js';
 
 const hash = (value) => createHash('sha256').update(value).digest('hex');
+/** Native bearer lifetime: unused for this long it expires; each authenticated use renews it, up to the absolute cap. */
+export const NATIVE_SESSION_IDLE_SECONDS = Number(process.env.HIVEMIND_NATIVE_SESSION_IDLE_SECONDS) > 0 ? Number(process.env.HIVEMIND_NATIVE_SESSION_IDLE_SECONDS) : 60 * 60 * 24 * 30;
+export const NATIVE_SESSION_MAX_SECONDS = Math.max(NATIVE_SESSION_IDLE_SECONDS, Number(process.env.HIVEMIND_NATIVE_SESSION_MAX_SECONDS) > 0 ? Number(process.env.HIVEMIND_NATIVE_SESSION_MAX_SECONDS) : 60 * 60 * 24 * 90);
 const id = () => randomBytes(32).toString('base64url');
 // Compare bound fields before deleting. A failed proof must not burn another user's grant.
 const CONSUME = `local raw=redis.call('GET',KEYS[1]); if not raw then return false end
@@ -36,9 +39,28 @@ rec.browserUserId=ARGV[1];local bound=cjson.encode(rec);redis.call('SET',KEYS[1]
   async createNativeSession(payload) {
     const token = randomUUID();
     const redis = await this.client();
-    await redis.set(`cp:session:${token}`, JSON.stringify({ ...payload, nativeMobile: true, createdAt: new Date(this.now()).toISOString() }), 'EX', 3600);
-    await redis.set(`cp:mobile-native-index:${nativeSessionHash(token)}`, token, 'EX', 3600);
+    await redis.set(`cp:session:${token}`, JSON.stringify({ ...payload, nativeMobile: true, createdAt: new Date(this.now()).toISOString() }), 'EX', NATIVE_SESSION_IDLE_SECONDS);
+    await redis.set(`cp:mobile-native-index:${nativeSessionHash(token)}`, token, 'EX', NATIVE_SESSION_IDLE_SECONDS);
     return token;
+  }
+  /**
+   * Sliding renewal for a native bearer that was just used: resets the session and runner-index expiry to the idle
+   * window, never past createdAt plus the absolute cap. Skips the write while more than half the window remains.
+   * Returns true when the expiry was extended.
+   */
+  async renewNativeSession(sessionId, session) {
+    if (session?.nativeMobile !== true) return false;
+    const created = Date.parse(session.createdAt);
+    if (!Number.isFinite(created)) return false;
+    const target = Math.min(NATIVE_SESSION_IDLE_SECONDS * 1000, created + NATIVE_SESSION_MAX_SECONDS * 1000 - this.now());
+    if (target <= 0) return false;
+    const redis = await this.client();
+    const sessionKey = `cp:session:${sessionId}`;
+    const remaining = await redis.pttl(sessionKey);
+    if (remaining <= 0 || remaining >= target || remaining > NATIVE_SESSION_IDLE_SECONDS * 500) return false;
+    await redis.pexpire(sessionKey, target);
+    await redis.pexpire(`cp:mobile-native-index:${nativeSessionHash(sessionId)}`, target);
+    return true;
   }
   async consume(kind, token, expected) {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token || '')) return null;

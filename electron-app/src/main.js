@@ -475,6 +475,8 @@ const rooms = createRoomManager({
   getWindow: () => mainWindow,
   preload: path.join(__dirname, 'room-preload.js'),
   lastRoom: roomsLast,
+  slideMs: 300,
+  reduceMotion: () => !!(electron.systemPreferences.getAnimationSettings && electron.systemPreferences.getAnimationSettings().prefersReducedMotion),
   onClosed: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('native:room-closed'); },
 });
 // On-device screens (W5): same-origin interceptor so cookies keep working; see native/screens.js.

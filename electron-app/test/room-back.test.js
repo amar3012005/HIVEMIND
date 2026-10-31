@@ -9,14 +9,14 @@ const P1 = '/employees/11111111-1111-1111-1111-111111111111';
 const BACK = { type: 'hivemind.open-dot.back', version: 1 };
 
 function loadRoomPreload(location, isTop = true) {
-  const exposed = {}; const sent = [];
+  const exposed = {}; const sent = []; const listeners = {};
   const fake = { contextBridge: { exposeInMainWorld: (n, v) => { exposed[n] = v; } }, ipcRenderer: { send: (c, m) => sent.push([c, m]) } };
   const orig = Module._load; const prev = { window: global.window, location: global.location };
   Module._load = (req, ...r) => (req === 'electron' ? fake : orig(req, ...r));
-  global.location = location; global.window = { top: null }; global.window.top = isTop ? global.window : {};
+  global.location = location; global.window = { top: null, addEventListener: (type, fn) => { listeners[type] = fn; } }; global.window.top = isTop ? global.window : {};
   try { delete require.cache[require.resolve('../src/room-preload.js')]; require('../src/room-preload.js'); }
   finally { Module._load = orig; global.window = prev.window; global.location = prev.location; }
-  return { exposed, sent };
+  return { exposed, sent, listeners };
 }
 
 test('room preload host list equals policy ROOM_HOSTS', () => {
@@ -80,4 +80,32 @@ test('main validates the back message: wrong sender, frame, host, type or hidden
   assert.equal(m.rooms.handleBack(ev(), BACK), true);
   assert.equal(m.rooms.isOpen(), false); assert.equal(m.closed(), 1, 'renderer is told');
   assert.equal(m.rooms.handleBack(ev(), BACK), false, 'hidden room ignores it');
+});
+
+test('two-finger swipe right (accumulated leftward wheel deltas) sends the back message once; vertical or sideways-scrolling content does not', () => {
+  const origCss = global.getComputedStyle;
+  global.getComputedStyle = (el) => ({ overflowX: el.overflowX || 'visible' });
+  try {
+    const wheel = (deltaX, deltaY, target) => ({ deltaX, deltaY, target });
+    const plain = { nodeType: 1, parentElement: null };
+    const room = () => loadRoomPreload({ protocol: 'https:', hostname: 'runtime-runner.singulancelabs.com' });
+
+    const a = room();
+    for (let i = 0; i < 4; i++) a.listeners.wheel(wheel(-80, 2, plain));
+    for (let i = 0; i < 4; i++) a.listeners.wheel(wheel(-80, 2, plain));
+    assert.deepEqual(a.sent, [['native:room:back', BACK]], 'once per gesture');
+
+    const b = room();
+    for (let i = 0; i < 10; i++) b.listeners.wheel(wheel(-80, 90, plain));
+    assert.deepEqual(b.sent, [], 'vertical scrolling');
+
+    const c = room();
+    for (let i = 0; i < 10; i++) c.listeners.wheel(wheel(80, 1, plain));
+    assert.deepEqual(c.sent, [], 'swipe left');
+
+    const d = room();
+    const table = { nodeType: 1, parentElement: null, overflowX: 'auto', scrollWidth: 900, clientWidth: 300 };
+    for (let i = 0; i < 10; i++) d.listeners.wheel(wheel(-80, 1, { nodeType: 1, parentElement: table }));
+    assert.deepEqual(d.sent, [], 'a sideways-scrolling table keeps its own scroll');
+  } finally { global.getComputedStyle = origCss; }
 });

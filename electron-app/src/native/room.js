@@ -34,7 +34,15 @@ function createLastRoomStore({ file, fs = nodeFs }) {
   };
 }
 
-function createRoomManager({ electron, getWindow, onClosed, preload, lastRoom = { get: () => null, set() {}, clear() {} } }) {
+const TICK_MS = 16;
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+
+/**
+ * `slideMs` is the duration of the slide from and to the right edge (0 = no animation: the view appears and
+ * disappears at once). `reduceMotion()` returning true also skips it. `timer` is injectable for tests.
+ */
+function createRoomManager({ electron, getWindow, onClosed, preload, lastRoom = { get: () => null, set() {}, clear() {} }, slideMs = 0,
+  reduceMotion = () => false, timer = { now: Date.now, setInterval, clearInterval } }) {
   const { WebContentsView, session } = electron;
   let view = null;
   let viewPath = null;   // room the view holds (loading or loaded)
@@ -44,6 +52,8 @@ function createRoomManager({ electron, getWindow, onClosed, preload, lastRoom = 
   let shownPath = null;  // room on screen, null while hidden
   let generation = 0;    // bumped by every open/close/destroy so stale async steps stop
   let winHooked = null;
+  let offsetX = 0;       // left edge of the view in window pixels: 0 = covering the window, window width = off screen right
+  let slide = null;      // running slide animation: { handle, done }
 
   const ses = () => session.fromPartition(PARTITION);
 
@@ -51,7 +61,36 @@ function createRoomManager({ electron, getWindow, onClosed, preload, lastRoom = 
     const win = getWindow();
     if (!view || !win || win.isDestroyed()) return;
     const [w, h] = win.getContentSize();
-    view.setBounds({ x: 0, y: 0, width: w, height: h });
+    view.setBounds({ x: Math.round(offsetX), y: 0, width: w, height: h });
+  }
+
+  function slideEnabled() { return slideMs > 0 && !reduceMotion(); }
+
+  function stopSlide() {
+    if (!slide) return;
+    timer.clearInterval(slide.handle);
+    slide = null;
+  }
+
+  /** Moves the view's left edge from its current position to `target` (ease-out), then calls `done`. */
+  function slideTo(target, done) {
+    stopSlide();
+    const win = getWindow();
+    if (!view || !win || win.isDestroyed() || !slideEnabled() || offsetX === target) { offsetX = target; layout(); if (done) done(); return; }
+    const from = offsetX; const started = timer.now(); const mine = {};
+    slide = mine;
+    mine.handle = timer.setInterval(() => {
+      if (slide !== mine) return;
+      const t = Math.min(1, (timer.now() - started) / slideMs);
+      offsetX = from + (target - from) * easeOut(t);
+      layout();
+      if (t >= 1) { stopSlide(); offsetX = target; layout(); if (done) done(); }
+    }, TICK_MS);
+  }
+
+  function windowWidth() {
+    const win = getWindow();
+    return win && !win.isDestroyed() ? win.getContentSize()[0] : 0;
   }
 
   async function setCookie(cookie) {
@@ -87,7 +126,9 @@ function createRoomManager({ electron, getWindow, onClosed, preload, lastRoom = 
     if (winHooked !== win) {
       winHooked = win;
       win.on('resize', layout);
-      win.on('closed', () => { view = null; winHooked = null; shownPath = null; viewPath = null; });
+      // Three-finger swipe right (the macOS "swipe between pages" gesture) goes back, as in Safari.
+      win.on('swipe', (_event, direction) => { if (direction === 'right') close(); });
+      win.on('closed', () => { stopSlide(); offsetX = 0; view = null; winHooked = null; shownPath = null; viewPath = null; });
     }
   }
 
@@ -139,10 +180,15 @@ function createRoomManager({ electron, getWindow, onClosed, preload, lastRoom = 
     const changedScope = scopeChanged(scope);
     lastRoom.set(path, scope);
     ensureView(win);
+    stopSlide();
+    // A view still sliding out is brought back from where it is; a hidden one starts at the right edge.
+    const wasVisible = view.getVisible();
+    if (!wasVisible || !slideEnabled()) offsetX = slideEnabled() ? windowWidth() : 0;
     layout();
     shownPath = path;
     view.setVisible(true);
     view.webContents.focus();
+    slideTo(0);
     if (warm && !changedScope) return;
     const cookie = await getCookie();
     if (gen !== generation) return;
@@ -154,9 +200,13 @@ function createRoomManager({ electron, getWindow, onClosed, preload, lastRoom = 
     if (gen === generation && view) view.webContents.focus();
   }
 
+  /** Slides the view out to the right (when enabled), then hides it. The room counts as closed at once. */
   function hide() {
-    if (view) view.setVisible(false);
     shownPath = null;
+    if (!view) return;
+    const hidden = view;
+    if (!slideEnabled()) { stopSlide(); offsetX = 0; hidden.setVisible(false); layout(); return; }
+    slideTo(windowWidth(), () => { if (view === hidden && shownPath === null) { hidden.setVisible(false); offsetX = 0; layout(); } });
   }
 
   /**
@@ -182,6 +232,8 @@ function createRoomManager({ electron, getWindow, onClosed, preload, lastRoom = 
   /** Removes the view, its site data and the session cookie (sign-out, window closed). */
   function destroy({ forget = true } = {}) {
     generation++;
+    stopSlide();
+    offsetX = 0;
     const win = getWindow();
     const v = view; view = null; shownPath = null; viewPath = null; viewScope = null; viewUrl = null; failed = false;
     if (v) {

@@ -379,7 +379,16 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
             self.room = controller
             controller.modalPresentationStyle = .fullScreen
             // Present first: the room's own loading screen (cached name and look) appears while the cookie and page arrive.
-            presenter.present(controller, animated: true) { call.resolve() }
+            // A presentation or dismissal still animating would make UIKit refuse this one, so wait for it to finish.
+            func present(_ attempt: Int) {
+                if let busy = presenter.presentedViewController, busy !== controller, attempt < 20 {
+                    if busy.isBeingPresented || busy.isBeingDismissed { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { present(attempt + 1) }; return }
+                    busy.dismiss(animated: false) { present(attempt + 1) }; return
+                }
+                if presenter.presentedViewController === controller { call.resolve(); return }
+                presenter.present(controller, animated: true) { call.resolve() }
+            }
+            present(0)
             load()
         }
     }

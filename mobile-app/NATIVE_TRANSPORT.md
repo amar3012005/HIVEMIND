@@ -49,6 +49,25 @@ cancellation. No broad storage permission is requested. The decoded file cap is
 20 MiB and cancellation returns `{saved:false}`. Frontend download actions must
 invoke this method instead of relying on WebView Blob-download anchors.
 
+## Bundled Runtime code
+
+`npm run package:web` also runs `scripts/package-runtime.mjs`. It reads the Da-vinci
+`cloudflare/generated/runtime-native-assets.json` (default
+`../frontend/Da-vinci/...`, override with `SINGULANCE_RUNTIME_ASSET_MANIFEST`), downloads the
+current release's public `/plugins/*` and `/assets/*` files from
+`runtime-runner.singulancelabs.com`, and writes `www/runtime/manifest.json` plus
+content-addressed files. It fails if the Worker reports a different release
+(`x-runtime-static-release`), returns HTML, or the shell revision does not match its bytes.
+The manifest records the release and boot-graph revision; the shell is also keyed by the
+boot-graph revision the app requests.
+
+`RuntimeBundle.swift` answers an iOS GET/HEAD for `next.singulancelabs.com` only when the exact
+`path?query` is listed. Plugin and shell URLs carry content or boot-graph revisions, so a new
+Runtime release produces unlisted URLs and those requests go to the network unchanged. `/api/*`,
+cookies, authorization and sockets never use the bundle. Hits and misses are logged
+(`com.singulancelabs.mobile`, category `runtime-bundle`) with path, size and lookup time. Android
+ignores the bundle and uses the network.
+
 ## DSH streaming
 
 The active Harness source at `28f65228d8` declares

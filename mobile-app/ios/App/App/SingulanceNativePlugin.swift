@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import Security
+import os
 import WebKit
 import Capacitor
 import AuthenticationServices
@@ -141,6 +142,18 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
         }
         return request
     }
+    private static let runtimeLog = Logger(subsystem: "com.singulancelabs.mobile", category: "runtime-bundle")
+    /// Runtime web-client code listed in the packaged bundle, or nil to use the network.
+    private func localRuntimeResource(_ request: URLRequest) -> RuntimeBundle.Resource? {
+        // URL.path drops the trailing slash of "/plugins/??..." combo URLs, so test the manifest key.
+        guard let url = request.url, ["GET", "HEAD"].contains(request.httpMethod ?? "GET"), let key = RuntimeBundle.key(for: url),
+              key.hasPrefix("/plugins/") || key.hasPrefix("/assets/") else { return nil }
+        let started = CFAbsoluteTimeGetCurrent()
+        let hit = RuntimeBundle.shipped?.resource(for: url)
+        let milliseconds = Int((CFAbsoluteTimeGetCurrent() - started) * 1000)
+        Self.runtimeLog.info("runtime-code \(hit == nil ? "network" : "bundle", privacy: .public) \(key.prefix(48), privacy: .public) \(hit?.data.count ?? 0, privacy: .public)B \(milliseconds, privacy: .public)ms")
+        return hit
+    }
     @objc func request(_ call: CAPPluginCall) {
         do {
             guard trusted() else { throw NativeError.denied }
@@ -148,6 +161,13 @@ public class SingulanceNativePlugin: CAPPlugin, CAPBridgedPlugin, URLSessionTask
                 call.resolve(["status": 401, "headers": [:], "data": "{\"error\":\"signed_out\"}"]); return
             }
             let request = try makeRequest(call)
+            if let local = localRuntimeResource(request) {
+                let responseType = call.getString("responseType") ?? "text"
+                guard ["text", "base64"].contains(responseType) else { call.reject("Response type is invalid."); return }
+                let body = request.httpMethod == "HEAD" ? Data() : local.data
+                call.resolve(["status": 200, "headers": ["content-type": local.type, "content-length": String(local.data.count)], "encoding": responseType, "data": responseType == "base64" ? body.base64EncodedString() : (String(data: body, encoding: .utf8) ?? "")])
+                return
+            }
             session.dataTask(with: request) { data, response, error in
                 guard error == nil, let response = response as? HTTPURLResponse, let data = data, data.count <= 20 * 1024 * 1024 else { call.reject("Native request failed."); return }
                 if let url = response.url, url.host == "next.singulancelabs.com" {

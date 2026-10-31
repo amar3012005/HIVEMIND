@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { NATIVE_SESSION_IDLE_SECONDS } from './auth-store.js';
 export const MOBILE_CALLBACK = 'singulance://auth/callback';
 export const MOBILE_ORIGINS = Object.freeze(['capacitor://localhost', 'https://localhost']);
 const challengeOf = (verifier) => createHash('sha256').update(verifier).digest('base64url');
@@ -93,7 +94,7 @@ export async function handleMobileAuthRoutes({ req, res, pathname, url, store, s
       if(!await membershipActive(record)) return send({error:'Account or membership unavailable'},403);
       // This is a distinct revocable CP session, never the browser session or a broad API key.
       const token=await store.createNativeSession({userId:record.userId,email:record.email,orgId:record.orgId});
-      return send({session_token:token,token_type:'Bearer',expires_in:3600,user_id:record.userId,org_id:record.orgId});
+      return send({session_token:token,token_type:'Bearer',expires_in:NATIVE_SESSION_IDLE_SECONDS,user_id:record.userId,org_id:record.orgId});
     }
     if(pathname === '/auth/mobile/revoke' && req.method === 'POST') {
       const current=await getCurrentSession(req); if(!current || !current.session.nativeMobile) return send({error:'Unauthorized'},401);

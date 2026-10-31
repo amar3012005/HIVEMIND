@@ -66,7 +66,7 @@ export async function messageAdministrator({ db, claims, input, send, publicBase
  if (!user?.email || user.deletedAt || typeof organization?.name!=='string' || !organization.name.trim() || organization.name.length>200 || /[\r\n\u0000-\u001f]/.test(organization.name)) fail('administrator_unavailable',409);
  const preference = await db.hqRuntime.findUnique({where:{orgId:claims.org_id},select:{ownerUserId:true,emailUpdatesEnabled:true}});
  if (preference?.ownerUserId === claims.sub && preference.emailUpdatesEnabled === false) return {status:'disabled',sent:false};
- const schemas=await db.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_name='harness_sessions'");
+ const schemas=await db.$queryRawUnsafe("SELECT table_schema FROM information_schema.tables WHERE table_schema='hivemind' AND table_name='harness_sessions' AND table_type='BASE TABLE'");
  if(schemas.length!==1 || !/^[a-z_][a-z0-9_]*$/.test(schemas[0].table_schema))fail('harness_storage_unavailable',503);
  const schema=schemas[0].table_schema;
  const storage=await nativeAgentStoragePrincipal(db,{orgId:claims.org_id,userId:claims.sub,runtimeSessionId:claims.operating_session,sharedOrganizationAgents});

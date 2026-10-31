@@ -26,3 +26,35 @@ contextBridge.exposeInMainWorld('electron', {
     return () => ipcRenderer.removeListener('deep-link', h);
   },
 });
+
+// PlatformAdapter for the shared sync core (tokenStore, prefs, openRoom, workspaceAccess,
+// onForeground, notify). Sandboxed preloads cannot require local files, so the channel
+// names are literal here; test/preload-bridge.test.js checks them against native/bridge.js.
+const call = (channel, args) => ipcRenderer.invoke(channel, args);
+const subscribe = (channel, cb) => {
+  const h = (_e, data) => cb(data);
+  ipcRenderer.on(channel, h);
+  return () => ipcRenderer.removeListener(channel, h);
+};
+contextBridge.exposeInMainWorld('singulanceDesktop', Object.freeze({
+  version: 1,
+  platform: process.platform,
+  tokenStore: Object.freeze({
+    get: (key) => call('native:token:get', { key }).then((r) => r.value),
+    set: (key, value) => call('native:token:set', { key, value }),
+    remove: (key) => call('native:token:remove', { key }),
+  }),
+  prefs: Object.freeze({
+    get: (key) => call('native:prefs:get', { key }).then((r) => r.value),
+    set: (key, value) => call('native:prefs:set', { key, value }),
+  }),
+  request: (options) => call('native:request', options),
+  workspaceAccess: () => call('native:workspace-access'),
+  openRoom: (options) => call('native:room:open', options),
+  closeRoom: () => call('native:room:close'),
+  onRoomClosed: (cb) => subscribe('native:room-closed', () => cb()),
+  onForeground: (cb) => subscribe('native:foreground', () => cb()),
+  notify: (n) => call('native:notify', n),
+  setUnread: (count) => call('native:unread', { count }),
+  onNotificationClick: (cb) => subscribe('native:notification-click', cb),
+}));

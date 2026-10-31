@@ -16,7 +16,8 @@
     "build:universal": "electron-builder build --mac --universal",
     "build:win": "electron-builder build --win",
     "dist": "electron-builder build --mac --publish=never",
-    "dist:win": "electron-builder build --win --publish=never"
+    "dist:win": "electron-builder build --win --publish=never",
+    "test": "node --test test/*.test.js"
   },
   "build": {
     "appId": "com.singulancelabs.desktop",

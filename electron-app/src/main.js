@@ -1,9 +1,18 @@
-const { app, BrowserWindow, shell, Menu, Tray, nativeImage, ipcMain, dialog } = require('electron');
+const electron = require('electron');
+const { app, BrowserWindow, shell, Menu, Tray, nativeImage, ipcMain, dialog, safeStorage, Notification, powerMonitor, session } = electron;
 const path = require('path');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 const fs = require('fs');
 const notch = require('./notch');
+const { TokenStore } = require('./native/token-store');
+const { createBridge, registerBridge } = require('./native/bridge');
+const { createRoomManager } = require('./native/room');
+const { createNotifier } = require('./native/notifier');
+const { parseDeepLink, isTrustedSender } = require('./native/policy');
+
+// Side-by-side runs (tests, a dev build next to the installed app) need their own single-instance lock.
+if (process.env.SINGULANCE_USER_DATA) app.setPath('userData', path.resolve(process.env.SINGULANCE_USER_DATA));
 
 const isDev = process.env.ELECTRON_IS_DEV === '1';
 // The desktop app is a first-class window onto the live product. file:// builds
@@ -16,6 +25,8 @@ let mainWindow = null;
 let splashWindow = null;
 let tray = null;
 let isQuitting = false;
+let pendingDeepLink = null;
+let lastForeground = 0;
 let updateState = 'idle'; // idle | checking | downloading | downloaded | none | error
 
 // ── App metadata ──────────────────────────────────────────────
@@ -37,15 +48,39 @@ if (process.defaultApp) {
   app.setAsDefaultProtocolClient(PROTOCOL);
 }
 
-function handleDeepLink(url) {
-  if (!url || !url.startsWith(`${PROTOCOL}://`)) return;
-  log.info('deep-link:', url);
-  if (mainWindow) {
-    mainWindow.webContents.send('deep-link', url);
+// Only web and mail links leave the app; file:, javascript: and custom schemes are dropped.
+function openExternalSafe(url) {
+  try {
+    const u = new URL(url);
+    if (['https:', 'http:', 'mailto:'].includes(u.protocol)) shell.openExternal(u.toString());
+  } catch { /* not a URL */ }
+}
+
+function handleDeepLink(raw) {
+  const url = parseDeepLink(raw);
+  if (!url) return;
+  log.info('deep-link received');
+  pendingDeepLink = url;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    // The product page keeps connections open, so did-finish-load may never fire: a window with a URL is ready.
+    if (mainWindow.webContents.getURL()) flushDeepLink();
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
   }
+}
+
+function flushDeepLink() {
+  if (!pendingDeepLink || !mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('deep-link', pendingDeepLink);
+  pendingDeepLink = null;
+}
+
+function notifyForeground() {
+  const now = Date.now();
+  if (now - lastForeground < 1000 || !mainWindow || mainWindow.isDestroyed()) return;
+  lastForeground = now;
+  mainWindow.webContents.send('native:foreground');
 }
 
 // ── Single-instance lock ──────────────────────────────────────
@@ -105,8 +140,7 @@ function createWindow() {
     minHeight: 600,
     title: 'SINGULANCE',
     icon: path.join(__dirname, '..', 'assets', 'icon.png'),
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 16 },
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 16 } } : { autoHideMenuBar: true }),
     backgroundColor: '#faf9f4',
     show: false,
     webPreferences: {
@@ -136,6 +170,10 @@ function createWindow() {
   });
   ipcMain.removeHandler('retry-connect');
   ipcMain.handle('retry-connect', () => { if (mainWindow) mainWindow.loadURL(APP_URL); });
+
+  mainWindow.webContents.on('dom-ready', flushDeepLink);
+  mainWindow.on('focus', notifyForeground);
+  mainWindow.on('show', notifyForeground);
 
   // Show once ready (avoids white flash)
   mainWindow.once('ready-to-show', () => {
@@ -227,7 +265,7 @@ function createWindow() {
         },
       };
     }
-    shell.openExternal(url);
+    openExternalSafe(url);
     return { action: 'deny' };
   });
 
@@ -235,19 +273,21 @@ function createWindow() {
     const inApp = (isDev && url.startsWith('http://localhost:3000')) || url.startsWith('file://') || isInApp(url);
     if (!inApp) {
       event.preventDefault();
-      shell.openExternal(url);
+      openExternalSafe(url);
     }
   });
 
   // Close → hide to dock (mac convention)
   mainWindow.on('close', (event) => {
-    if (!isQuitting && process.platform === 'darwin') {
+    // macOS hides to the dock; Windows/Linux hide to the tray when one exists.
+    if (!isQuitting && (process.platform === 'darwin' || tray)) {
       event.preventDefault();
       mainWindow.hide();
     }
   });
 
   mainWindow.on('closed', () => {
+    rooms.close({ silent: true });
     mainWindow = null;
   });
 }
@@ -310,7 +350,7 @@ function createMenu() {
         { type: 'separator' },
         {
           label: 'Quit SINGULANCE',
-          accelerator: 'Cmd+Q',
+          accelerator: 'CmdOrCtrl+Q',
           click: () => {
             isQuitting = true;
             app.quit();
@@ -343,6 +383,10 @@ function createMenu() {
         { role: 'togglefullscreen' },
         ...(isDev ? [{ type: 'separator' }, { role: 'toggleDevTools' }] : []),
       ],
+    },
+    {
+      label: 'Room',
+      submenu: [{ label: 'Close Room', accelerator: 'CmdOrCtrl+W', click: () => rooms.close() }],
     },
     {
       label: 'Window',
@@ -436,9 +480,46 @@ autoUpdater.on('update-downloaded', (info) => {
   });
 });
 
+// ── Native bridge (PlatformAdapter) ───────────────────────────
+// Core calls use an in-memory session with no cookies; Runner calls use their own private jar.
+const tokenStore = new TokenStore({ safeStorage, dir: path.join(app.getPath('userData'), 'secure') });
+const rooms = createRoomManager({
+  electron,
+  getWindow: () => mainWindow,
+  onClosed: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('native:room-closed'); },
+});
+const notifier = createNotifier({
+  Notification,
+  onClick: (target, id) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show(); mainWindow.focus();
+      mainWindow.webContents.send('native:notification-click', { path: target, id });
+    }
+  },
+});
+const bridge = createBridge({
+  tokenStore,
+  fetchCore: (url, init) => session.fromPartition('singulance-core').fetch(url, { ...init, credentials: 'omit' }),
+  fetchRunner: (url, init) => session.fromPartition('singulance-runner').fetch(url, { ...init, credentials: 'include' }),
+  rooms,
+  notifier,
+  prefsFile: path.join(app.getPath('userData'), 'prefs.json'),
+  setUnread: (count) => {
+    app.setBadgeCount(count);
+    if (tray && process.platform === 'darwin') tray.setTitle(count ? String(count) : '');
+    if (tray) tray.setToolTip(count ? `SINGULANCE (${count})` : 'SINGULANCE');
+  },
+  onSignOut: async () => {
+    rooms.close({ silent: true });
+    await session.fromPartition('singulance-runner').clearStorageData().catch(() => {});
+  },
+});
+registerBridge(ipcMain, bridge);
+
 // ── App lifecycle ─────────────────────────────────────────────
-ipcMain.handle('open-external', (_, url) => {
-  shell.openExternal(url);
+ipcMain.handle('open-external', (event, url) => {
+  if (event.senderFrame && isTrustedSender(event.senderFrame.url)) openExternalSafe(url);
 });
 
 ipcMain.handle('check-for-updates', () => { checkForUpdates(true); });
@@ -457,6 +538,10 @@ ipcMain.handle('launch-app', () => {
 app.whenReady().then(() => {
   // Cinematic B&W signature intro on every open, then the workspace.
   createSplash();
+  // Windows/Linux cold start by link: the URL arrives in argv of the first process.
+  const coldLink = process.argv.find((a) => a.startsWith(`${PROTOCOL}://`));
+  if (coldLink) handleDeepLink(coldLink);
+  powerMonitor.on('resume', notifyForeground);
 
   // Notch HUD — quick capture, knowledge-base drops and meeting notes, hanging
   // off the top edge. It resolves the main window lazily (that is where its API
